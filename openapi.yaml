@@ -7,7 +7,7 @@ servers:
 paths:
   /get-content:
     get:
-      operationID: getContent
+      operationId: getContent
       summary: Get content from a Notion page
       parameters:
         - name: page_name
