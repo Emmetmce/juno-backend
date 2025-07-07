@@ -3,3 +3,6 @@ uvicorn
 python-dotenv
 notion-client
 openai
+numpy
+httpx
+supabase
