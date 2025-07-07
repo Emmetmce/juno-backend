@@ -1,0 +1,27 @@
+openapi: 3.1.0
+info:
+  title: Juno Memory API
+  version: 1.0.0
+servers:
+  - url: https://juno-backend-gbya.onrender.com  
+paths:
+  /get-content:
+    get:
+      operationId: getContent
+      summary: Get content from a Notion page
+      parameters:
+        - name: page_name
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Text content from a Notion page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  content:
+                    type: string
