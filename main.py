@@ -7,6 +7,10 @@ from supabase.client import create_client, Client
 from notion_util import get_page_content  
 from fastapi.responses import FileResponse
 
+#logging for debugging
+import logging
+logging.basicConfig(level=logging.INFO)
+
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 def embed_text(text: str):
     response = openai.embeddings.create(
