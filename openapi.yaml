@@ -3,7 +3,7 @@ info:
   title: Juno Memory API
   version: 1.0.0
 servers:
-  - url: https://juno-backend-gbya.onrender.com
+  - url: https://juno-backend-7lj5.onrender.com
 paths:
   /query:
     post:
