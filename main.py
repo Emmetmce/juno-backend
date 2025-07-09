@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 #logging for debugging
 import logging
 logging.basicConfig(level=logging.INFO)
+app = FastAPI()
 
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 def embed_text(text: str):
@@ -18,7 +19,6 @@ def embed_text(text: str):
         input=text
     )
     return response.data[0].embedding
-app = FastAPI()
 
 @app.get("/ping")
 async def ping():
