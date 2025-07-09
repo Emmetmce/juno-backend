@@ -56,22 +56,10 @@ def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 @app.post("/query")
-async def query_knowledge_base(query: QueryRequest):
+async def query_knowledge_base(query: dict):
     try:
-        print("📩 Received query:", query.query)
-
-        embedded_query = embed_text(query.query)
-        print("✅ Embedded query:", embedded_query)
-
-        response = supabase.rpc("match_juno_embeddings", {
-            "query_embedding": embedded_query,
-            "match_threshold": 0.8,
-            "match_count": 5
-        }).execute()
-
-        print("🔍 Supabase RPC response:", response)
-        return {"results": response.data}
-
+        print("✅ ROUTE HIT SUCCESSFULLY")
+        return {"results": ["This is a test"]}
     except Exception as e:
-        print("❌ Query route error:", str(e))
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        print("❌ ERROR:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
