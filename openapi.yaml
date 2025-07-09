@@ -31,5 +31,6 @@ paths:
                     items:
                       type: string
 
-components: {}
+components: 
+  schemas: {}
 security: []
