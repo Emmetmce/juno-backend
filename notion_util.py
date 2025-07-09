@@ -84,6 +84,12 @@ def extract_blocks_from_page(page_id):
     
     def extract_text_from_block(block):
         """Extract text content from various block types"""
+
+        #ensure block is a dict
+        if not isinstance(block, dict):
+            logger.warning(f"Expected dict block, got {type(block)}: {block}")
+            return []
+        
         block_type = block.get("type")
         if not block_type:
             return []
@@ -122,6 +128,11 @@ def extract_blocks_from_page(page_id):
         content = []
         
         for block in blocks:
+            # Ensure block is a dict
+            if not isinstance(block, dict):
+                logger.warning(f"Skipping non-dict block: {type(block)} - {block}")
+                continue
+            
             block_type = block.get("type")
             if not block_type:
                 continue
@@ -163,24 +174,65 @@ def extract_blocks_from_page(page_id):
             # Handle child blocks recursively
             if block.get("has_children"):
                 try:
-                    child_blocks = notion.blocks.children.list(block["id"])["results"]
-                    content.extend(extract_blocks(child_blocks))
-                    # Add small delay to avoid rate limiting
+                    child_response = notion.blocks.children.list(block["id"])
+                    child_blocks = child_response.get("results", [])
+
+                    # Filter out non-dict items before recursion
+                    valid_child_blocks = [b for b in child_blocks if isinstance(b, dict)]
+                    
+                    if len(valid_child_blocks) != len(child_blocks):
+                        logger.warning(f"Filtered out {len(child_blocks) - len(valid_child_blocks)} invalid child blocks")
+                    
+                    content.extend(extract_blocks(valid_child_blocks))
+                    # Add delay to avoid rate limiting
                     time.sleep(0.1)
                 except Exception as e:
                     logger.error(f"Error fetching child blocks for {block['id']}: {e}")
+                    logger.debug(f"Block that caused error: {block}")
         
         return content
     
     try:
         # Get top-level blocks
-        blocks = notion.blocks.children.list(page_id)["results"]
-        all_content = extract_blocks(blocks)
+        response = notion.blocks.children.list(page_id)
+        blocks = response.get("results", [])
+
+        # Filter out non-dict items
+        valid_blocks = [b for b in blocks if isinstance(b, dict)]
+        
+        if len(valid_blocks) != len(blocks):
+            logger.warning(f"Filtered out {len(blocks) - len(valid_blocks)} invalid top-level blocks")
+        
+        all_content = extract_blocks(valid_blocks)
         return "\n".join(all_content)
         
     except Exception as e:
         logger.error(f"Error extracting blocks from page {page_id}: {e}")
         return f"Error extracting page content: {e}"
+    
+def debug_page_blocks(page_id):
+    """Debug function to see what blocks exist on a page"""
+    try:
+        response = notion.blocks.children.list(page_id)
+        blocks = response.get("results", [])
+        logger.info(f"Found {len(blocks)} blocks on page {page_id}")
+        
+        for i, block in enumerate(blocks):
+            # Add type checking for debugging
+            if not isinstance(block, dict):
+                logger.info(f"Block {i}: NON-DICT TYPE - {type(block)} - {block}")
+                continue
+                
+            block_type = block.get("type")
+            logger.info(f"Block {i}: type={block_type}, has_children={block.get('has_children', False)}")
+            
+            if block_type in ["file", "pdf", "image"]:
+                logger.info(f"  File block details: {block.get(block_type, {})}")
+        
+        return blocks
+    except Exception as e:
+        logger.error(f"Error debugging page blocks: {e}")
+        return []
 
 # Helper function to test the utility
 #def test_page_extraction(page_name):
