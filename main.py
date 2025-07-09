@@ -20,6 +20,10 @@ def embed_text(text: str):
     return response.data[0].embedding
 app = FastAPI()
 
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
 #env setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -57,6 +61,7 @@ def cosine_similarity(a, b):
 
 @app.post("/query")
 async def query_knowledge_base(query: dict):
+    logging.info("🚀 /query route hit")
     try:
         print("✅ ROUTE HIT SUCCESSFULLY")
         return {"results": ["This is a test"]}
