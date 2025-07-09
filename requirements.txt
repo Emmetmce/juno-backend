@@ -7,3 +7,4 @@ numpy
 httpx
 supabase
 PyPDF2
+requests
