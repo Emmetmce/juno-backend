@@ -57,13 +57,23 @@ def cosine_similarity(a, b):
 
 @app.post("/query")
 async def query_knowledge_base(query: QueryRequest):
-    logging.info(f"Received query: {query.query}")
-    
-    embedded_query = embed_text(query.query)
-    response = supabase.rpc("match_juno_embeddings", {
-        "query_embedding": embedded_query,
-        "match_threshold": 0.8,
-        "match_count": 5
-    }).execute()
+    try:
+        logging.info(f"Received query: {query.query}")
 
-    return {"results": response.data}
+        # Embed the incoming query string
+        embedded_query = embed_text(query.query)
+        logging.info("Embedded query successfully")
+
+        # Call the Supabase stored procedure to get matches
+        response = supabase.rpc("match_juno_embeddings", {
+            "query_embedding": embedded_query,
+            "match_threshold": 0.8,
+            "match_count": 5
+        }).execute()
+
+        logging.info(f"Supabase RPC response: {response.data}")
+        return {"results": response.data}
+
+    except Exception as e:
+        logging.error(f"Query route error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
