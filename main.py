@@ -57,6 +57,8 @@ def cosine_similarity(a, b):
 
 @app.post("/query")
 async def query_knowledge_base(query: QueryRequest):
+    logging.info(f"Received query: {query.query}")
+    
     embedded_query = embed_text(query.query)
     response = supabase.rpc("match_juno_embeddings", {
         "query_embedding": embedded_query,
