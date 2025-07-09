@@ -6,11 +6,21 @@ import numpy as np
 from supabase.client import create_client, Client
 from notion_util import get_page_content  
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 #logging for debugging
 import logging
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
+
+#allowing CORS for all origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # can add ["https://chat.openai.com"] for future security
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 def embed_text(text: str):
@@ -32,6 +42,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Auth
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 openai.api_key = OPENAI_API_KEY
+
 #serve static files
 @app.get("/openapi.yaml")
 def get_openapi_yaml():
@@ -60,11 +71,26 @@ def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 @app.post("/query")
-async def query_knowledge_base(query: dict):
-    logging.info("🚀 /query route hit")
+async def query_knowledge_base(query: QueryRequest):
+    logging.info("/query route hit")
     try:
-        print("✅ ROUTE HIT SUCCESSFULLY")
-        return {"results": ["This is a test"]}
+        logging.info(f"Received query: {query.query}")
+        embedded_query = embed_text(query.query)
+        logging.info("Query embedded successfully")
+
+        response = supabase.rpc("match_juno_embeddings", {
+            "query_embedding": embedded_query,
+            "match_threshold": 0.8,
+            "match_count": 5
+        }).execute()
+
+        if response.error:
+            logging.error(f"Supabase RPC error: {response.error}")
+            raise HTTPException(status_code=500, detail=response.error.message)
+
+        logging.info(f"Supabase returned {len(response.data)} matches")
+        return {"results": response.data}
+
     except Exception as e:
-        print("❌ ERROR:", str(e))
+        logging.exception("Exception in /query")
         raise HTTPException(status_code=500, detail=str(e))
