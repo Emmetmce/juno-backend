@@ -5,13 +5,15 @@ from dotenv import load_dotenv
 import logging
 import re
 from notion_client import Client
-from notion_util import extract_blocks_from_page  # Import the function directly
+from notion_util import extract_blocks_from_page 
+import hashlib
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# Load env variables
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -21,6 +23,43 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 notion = Client(auth=os.getenv("NOTION_TOKEN"))
+
+def get_file_hash(file_path):
+    """Generate a hash for the file to check if it has been processed"""
+    try:
+        with open(file_path, 'rb') as f:
+            file_content = f.read()
+            return hashlib.md5(file_content).hexdigest()
+    except Exception as e:
+        logger.error(f"Error generating hash for {file_path}: {e}")
+        return None
+
+def is_file_already_embedded(file_path, page_name):
+    """Check if a file has already been embedded by checking the database"""
+    try:
+        # Check by exact file path and page name
+        result = supabase.table("juno_embeddings").select("id").eq("source_file", file_path).eq("page_name", page_name).limit(1).execute()
+        
+        if result.data:
+            logger.info(f"File already embedded (exact match): {file_path}")
+            return True
+        
+        # Check by file hash (for when files are re-downloaded with different paths)
+        file_hash = get_file_hash(file_path)
+        if file_hash:
+            # Check if we have this hash in our database
+            hash_result = supabase.table("juno_embeddings").select("id").eq("file_hash", file_hash).limit(1).execute()
+            
+            if hash_result.data:
+                logger.info(f"File already embedded (hash match): {file_path}")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking if file is embedded: {e}")
+        return False  # If we can't check, assume it's not embedded to be safe
+
 
 def split_text(text, max_tokens=500):
     """Split text into chunks for embedding"""
@@ -43,6 +82,11 @@ def split_text(text, max_tokens=500):
 
 def embed_and_store(file_path, page_name):
     """Embed file content and store in Supabase"""
+    #check if file has already been embedded
+    if is_file_already_embedded(file_path, page_name):
+        logger.info(f"Skipping already embedded file: {file_path}")
+        return
+    
     # Skip unsupported file types
     if not file_path.endswith((".txt", ".md", ".pdf")):
         logger.warning(f"Skipping unsupported file type: {file_path}")
@@ -53,6 +97,9 @@ def embed_and_store(file_path, page_name):
         logger.error(f"File not found: {file_path}")
         return
     
+    #gen file hash for duplicate checking
+    file_hash = get_file_hash(file_path)
+
     try:
         # Read text from PDF using PyPDF2
         if file_path.endswith(".pdf"):
@@ -97,13 +144,23 @@ def embed_and_store(file_path, page_name):
                     "chunk": chunk,
                     "embedding": vector,
                     "source_file": file_path,
-                    "chunk_index": i
+                    "chunk_index": i,
+                    "file_hash": file_hash  
                 }).execute()
                 
                 logger.info(f"Inserted chunk {i+1}/{len(chunks)} from {file_path}")
                 
             except Exception as e:
                 logger.error(f"Error processing chunk {i} from {file_path}: {e}")
+
+def is_page_already_processed(page_name):
+    """Check if a Notion page has already been processed"""
+    try:
+        result = supabase.table("juno_embeddings").select("id").eq("page_name", page_name).limit(1).execute()
+        return len(result.data) > 0
+    except Exception as e:
+        logger.error(f"Error checking if page is processed: {e}")
+        return False
 
 def get_page_title(page):
     """Extract title from Notion page object"""
@@ -125,7 +182,7 @@ def get_page_title(page):
     # Last resort: use page ID
     return f"Page_{page['id']}"
 
-def batch_embed_all_notion_files():
+def batch_embed_all_notion_files(force_reprocess=False):#force_reprocess=False incase of overwriting existing data
     """Search all Notion pages for files, embed them, and store in Supabase"""
     logger.info("Connecting to Notion...")
     
@@ -135,12 +192,17 @@ def batch_embed_all_notion_files():
         logger.info(f"Found {len(search_results)} pages from Notion search")
         
         total_files_processed = 0
+        total_files_skipped = 0
         
         for page in search_results:
             page_id = page["id"]
             page_title = get_page_title(page)
             
             logger.info(f"Processing page: '{page_title}' (ID: {page_id})")
+            # Check if this page has already been processed
+            if not force_reprocess and is_page_already_processed(page_title):
+                logger.info(f"Page '{page_title}' already processed. Skipping.")
+                continue
             
             try:
                 # Extract content directly using page ID
@@ -159,6 +221,10 @@ def batch_embed_all_notion_files():
                     for file_path in file_paths:
                         file_path = file_path.strip()
                         logger.info(f"Processing file: {file_path}")
+                        if is_file_already_embedded(file_path, page_title):
+                            logger.info(f"File '{file_path}' already embedded. Skipping.")
+                            total_files_skipped += 1
+                            continue
                         embed_and_store(file_path, page_title)
                         total_files_processed += 1
                 else:
@@ -172,9 +238,15 @@ def batch_embed_all_notion_files():
                         try:
                             with open(temp_file, "w", encoding="utf-8") as f:
                                 f.write(text_content)
-                            embed_and_store(temp_file, page_title)
+
+                            if not is_file_already_embedded(temp_file, page_title):
+                                total_files_processed += 1
+                                embed_and_store(temp_file, page_title)
+                                logger.info(f"Embedded page text content for: {page_title}")
+                            else:
+                                logger.info(f"Page text content already embedded for: {page_title}")
+                                total_files_skipped += 1
                             os.remove(temp_file)  # Clean up
-                            logger.info(f"Embedded page text content for: {page_title}")
                         except Exception as e:
                             logger.error(f"Error processing page content for {page_title}: {e}")
                 
@@ -218,4 +290,5 @@ if __name__ == "__main__":
     # Uncomment the next line to test a specific page first
     # test_single_page("Competition Handbook & Rules")
     
-    batch_embed_all_notion_files()
+    batch_embed_all_notion_files(force_reprocess=False)  # Set to True to reprocess all pages
+    # Note: This will process all Notion pages and embed their content/files into Supabase
