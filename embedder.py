@@ -73,20 +73,32 @@ def is_file_already_embedded(file_path, page_name):
 
 
 def split_text(text, max_tokens=2000):
-    """Split text into chunks for embedding"""
+    """Split text into token-limited chunks for embedding"""
     enc = tiktoken.get_encoding("cl100k_base") # Using the same encoding as OpenAI
     paragraphs = text.split("\n\n")
     chunks = []
     current_chunk = ""
     
     for para in paragraphs:
-        test_chunk = current_chunk + para + "\n\n"
-        if len(enc.encode(test_chunk)) <= max_tokens:
-            current_chunk += test_chunk
+        para_tokens = enc.encode(para)
+        if len(para_tokens) > max_tokens:
+            # if paragraph is too long, split it into smaller chunks
+            start = 0
+            while start < len(para_tokens):
+                end = start + max_tokens
+                chunk_tokens = para_tokens[start:end]
+                chunk_text = enc.decode(chunk_tokens)
+                chunks.append(chunk_text.strip())
+                start = end
         else:
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
-            current_chunk = para + "\n\n"
+            # if paragraph fits, add it to the current chunk
+            test_chunk = current_chunk + para + "\n\n"
+            if len(enc.encode(test_chunk)) <= max_tokens:
+                current_chunk += test_chunk
+            else:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                current_chunk = para + "\n\n"
     
     if current_chunk.strip():
         chunks.append(current_chunk.strip())
