@@ -7,6 +7,7 @@ import re
 from notion_client import Client
 from notion_util import extract_blocks_from_page 
 import hashlib
+import tiktoken
 
 
 # Setup logging
@@ -61,15 +62,17 @@ def is_file_already_embedded(file_path, page_name):
         return False  # If we can't check, assume it's not embedded to be safe
 
 
-def split_text(text, max_tokens=500):
+def split_text(text, max_tokens=2000):
     """Split text into chunks for embedding"""
+    enc = tiktoken.get_encoding("cl100k_base") # Using the same encoding as OpenAI
     paragraphs = text.split("\n\n")
     chunks = []
     current_chunk = ""
     
     for para in paragraphs:
-        if len(current_chunk + para) < max_tokens:
-            current_chunk += para + "\n\n"
+        test_chunk = current_chunk + para + "\n\n"
+        if len(enc.encode(test_chunk)) <= max_tokens:
+            current_chunk += test_chunk
         else:
             if current_chunk.strip():
                 chunks.append(current_chunk.strip())
