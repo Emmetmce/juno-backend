@@ -35,6 +35,16 @@ def get_file_hash(file_path):
         logger.error(f"Error generating hash for {file_path}: {e}")
         return None
 
+def hash_chunk(text):
+    """Generate a hash for a text chunk to check if it has been processed"""
+    try:
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+    except Exception as e:
+        logger.error(f"Error generating hash for chunk: {e}")
+        return None
+
+#wont be used as much, going to be using is_chunk_already_embedded instead
+# but keeping this for future reference
 def is_file_already_embedded(file_path, page_name):
     """Check if a file has already been embedded by checking the database"""
     try:
@@ -86,9 +96,6 @@ def split_text(text, max_tokens=2000):
 def embed_and_store(file_path, page_name):
     """Embed file content and store in Supabase"""
     #check if file has already been embedded
-    if is_file_already_embedded(file_path, page_name):
-        logger.info(f"Skipping already embedded file: {file_path}")
-        return
     
     # Skip unsupported file types
     if not file_path.endswith((".txt", ".md", ".pdf")):
@@ -100,7 +107,7 @@ def embed_and_store(file_path, page_name):
         logger.error(f"File not found: {file_path}")
         return
     
-    #gen file hash for duplicate checking
+    #gen file hash for duplicate file checking
     file_hash = get_file_hash(file_path)
 
     try:
@@ -132,11 +139,17 @@ def embed_and_store(file_path, page_name):
     
     # Embed each chunk and store in Supabase
     for i, chunk in enumerate(chunks):
+
+        chunk_hash = hash_chunk(chunk) # Check if this chunk has already been embedded
+        result = supabase.table("juno_embeddings").select("id").eq("chunk_hash", chunk_hash).eq("page_name", page_name).limit(1).execute()
+        if result.data:
+            logger.info(f"Chunk {i+1}/{len(chunks)} already embedded. Skipping.")
+            continue
         if chunk.strip():
             try:
                 # Get embedding from OpenAI
                 response = openai.embeddings.create(
-                    model="text-embedding-3-small",
+                    model="text-embedding-ada-002",
                     input=chunk
                 )
                 vector = response.data[0].embedding
@@ -148,7 +161,8 @@ def embed_and_store(file_path, page_name):
                     "embedding": vector,
                     "source_file": file_path,
                     "chunk_index": i,
-                    "file_hash": file_hash  
+                    "file_hash": file_hash,
+                    "chunk_hash": chunk_hash 
                 }).execute()
                 
                 logger.info(f"Inserted chunk {i+1}/{len(chunks)} from {file_path}")
@@ -156,6 +170,7 @@ def embed_and_store(file_path, page_name):
             except Exception as e:
                 logger.error(f"Error processing chunk {i} from {file_path}: {e}")
 
+#should not be used in production, only for debugging because pages can have files added/removed
 def is_page_already_processed(page_name):
     """Check if a Notion page has already been processed"""
     try:
@@ -202,10 +217,6 @@ def batch_embed_all_notion_files(force_reprocess=False):#force_reprocess=False i
             page_title = get_page_title(page)
             
             logger.info(f"Processing page: '{page_title}' (ID: {page_id})")
-            # Check if this page has already been processed
-            if not force_reprocess and is_page_already_processed(page_title):
-                logger.info(f"Page '{page_title}' already processed. Skipping.")
-                continue
             
             try:
                 # Extract content directly using page ID
@@ -224,10 +235,7 @@ def batch_embed_all_notion_files(force_reprocess=False):#force_reprocess=False i
                     for file_path in file_paths:
                         file_path = file_path.strip()
                         logger.info(f"Processing file: {file_path}")
-                        if is_file_already_embedded(file_path, page_title):
-                            logger.info(f"File '{file_path}' already embedded. Skipping.")
-                            total_files_skipped += 1
-                            continue
+                        
                         embed_and_store(file_path, page_title)
                         total_files_processed += 1
                 else:
@@ -241,14 +249,10 @@ def batch_embed_all_notion_files(force_reprocess=False):#force_reprocess=False i
                         try:
                             with open(temp_file, "w", encoding="utf-8") as f:
                                 f.write(text_content)
-
-                            if not is_file_already_embedded(temp_file, page_title):
-                                total_files_processed += 1
+                                logger.info(f"Created temporary file for page content: {temp_file}")
                                 embed_and_store(temp_file, page_title)
-                                logger.info(f"Embedded page text content for: {page_title}")
-                            else:
-                                logger.info(f"Page text content already embedded for: {page_title}")
-                                total_files_skipped += 1
+                                total_files_processed += 1
+
                             os.remove(temp_file)  # Clean up
                         except Exception as e:
                             logger.error(f"Error processing page content for {page_title}: {e}")
