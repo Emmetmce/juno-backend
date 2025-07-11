@@ -113,7 +113,7 @@ paths:
 
   /ping:
     get:
-      operationId: healthCheck
+      operationId: pingHealthCheck
       summary: Health check endpoint
       description: Simple endpoint to check if the API is running
       responses:

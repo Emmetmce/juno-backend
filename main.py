@@ -11,51 +11,100 @@ from fastapi.middleware.cors import CORSMiddleware
 #logging for debugging
 import logging
 logging.basicConfig(level=logging.INFO)
-app = FastAPI()
+
+app = FastAPI(title="Juno Memory API",
+    description="API for querying Junk Kouture knowledge base using vector embeddings",
+    version="1.0.0"
+)
 
 #allowing CORS for all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # can add ["https://chat.openai.com"] for future security
+    allow_origins=[
+        "*",  # Allow all, just for now
+        "https://chat.openai.com",
+        "https://chatgpt.com",
+        "https://openai.com"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-openai.api_key = os.environ.get("OPENAI_API_KEY")
-def embed_text(text: str):
-    response = openai.embeddings.create(
-        model="text-embedding-3-small",
-        input=text
-    )
-    return response.data[0].embedding
-
-@app.get("/ping")
-async def ping():
-    return {"status": "ok"}
 
 #env setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Auth
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# create Supabase client and set OpenAI API key
+if not OPENAI_API_KEY:
+    logging.info("OPENAI_API_KEY environment variable is not set")
+    raise ValueError("OPENAI_API_KEY is required")
+
 openai.api_key = OPENAI_API_KEY
+
+# Supabase client
+if not SUPABASE_URL or not SUPABASE_KEY:
+    logging.info("Supabase credentials are not properly configured")
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY are required")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def embed_text(text: str):
+    """Generate embedding for text using OpenAI"""
+    try:
+        response = openai.embeddings.create(
+            model="text-embedding-3-small",
+            input=text
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        logging.info(f"Error generating embedding: {e}")
+        raise
+
+# Test site alive
+@app.get("/")
+def root():
+    return {
+        "status": "Juno backend is live!",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/ping",
+            "query": "/query",
+            "content": "/get-content",
+            "openapi": "/openapi.yaml"
+        }
+    }
+
+@app.get("/ping")
+async def pingHealthCheck():
+    try:
+        # Test database connection
+        result = supabase.table("juno_embeddings").select("id").limit(1).execute()
+        db_status = "connected" if result else "disconnected"
+        
+        return {
+            "status": "ok",
+            "database": db_status,
+            "timestamp": os.getenv("RENDER_EXTERNAL_HOSTNAME", "localhost")
+        }
+    except Exception as e:
+        logging.info(f"Health check failed: {e}")
+        return {
+            "status": "error",
+            "database": "disconnected",
+            "error": str(e)
+        }
 
 #serve static files
 @app.get("/openapi.yaml")
 def get_openapi_yaml():
     return FileResponse("openapi.yaml", media_type="text/yaml")
 
-# Test site alive
-@app.get("/")
-def root():
-    return {"status": "Juno backend is live!"}
 
 # Notion endpoint
 @app.get("/get-content")
-def get_content(page_name: str = Query(..., description="Title of Notion page")):
+def getNotionContent(page_name: str = Query(..., description="Title of Notion page")):
     try:
         content = get_page_content(page_name)
         return {"content": content}
@@ -70,8 +119,48 @@ class QueryRequest(BaseModel):
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
+async def get_relevant_chunks(query: str, k: int = 5):
+    """
+    Get top k matching chunks from Supabase using vector similarity
+    """
+    try:
+        # Get embedding for the query
+        embedding_response = openai.embeddings.create(
+            model="text-embedding-3-small",
+            input=query
+        )
+        query_embedding = embedding_response.data[0].embedding
+        
+        # Query Supabase using the match_documents function (if you have it)
+        # or fetch all and compute similarity
+        response = supabase.table("juno_embeddings").select(
+            "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash"
+        ).execute()
+        
+        if not response.data:
+            return []
+        
+        chunks = response.data
+        
+        # Compute similarity for each chunk
+        for chunk in chunks:
+            chunk_embedding = np.array(chunk["embedding"])
+            chunk["similarity"] = cosine_similarity(query_embedding, chunk_embedding)
+
+            chunk["content"] = chunk["chunk"]
+            chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
+        
+        # Sort by similarity and return top k
+        top_chunks = sorted(chunks, key=lambda x: x["similarity"], reverse=True)[:k]
+        
+        return top_chunks
+        
+    except Exception as e:
+        logging.error("❌ Error getting matching chunks:", exc_info=True)
+        return []
+
 @app.post("/query")
-async def query_knowledge_base(query: QueryRequest):
+async def queryKnowledgeBase(query: QueryRequest):
     logging.info(f"Received query: {query.query}")
 
     try: 
@@ -148,42 +237,3 @@ Context quality: Based on the similarity scores, prioritize information from hig
         logging.error("❌ Error in query endpoint:", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-async def get_relevant_chunks(query: str, k: int = 5):
-    """
-    Get top k matching chunks from Supabase using vector similarity
-    """
-    try:
-        # Get embedding for the query
-        embedding_response = openai.embeddings.create(
-            model="text-embedding-3-small",
-            input=query
-        )
-        query_embedding = embedding_response.data[0].embedding
-        
-        # Query Supabase using the match_documents function (if you have it)
-        # or fetch all and compute similarity
-        response = supabase.table("juno_embeddings").select(
-            "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash"
-        ).execute()
-        
-        if not response.data:
-            return []
-        
-        chunks = response.data
-        
-        # Compute similarity for each chunk
-        for chunk in chunks:
-            chunk_embedding = np.array(chunk["embedding"])
-            chunk["similarity"] = cosine_similarity(query_embedding, chunk_embedding)
-
-            chunk["content"] = chunk["chunk"]
-            chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
-        
-        # Sort by similarity and return top k
-        top_chunks = sorted(chunks, key=lambda x: x["similarity"], reverse=True)[:k]
-        
-        return top_chunks
-        
-    except Exception as e:
-        logging.error("❌ Error getting matching chunks:", exc_info=True)
-        return []
