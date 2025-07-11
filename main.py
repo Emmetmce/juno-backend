@@ -54,7 +54,7 @@ def embed_text(text: str):
     """Generate embedding for text using OpenAI"""
     try:
         response = openai.embeddings.create(
-            model="text-embedding-3-small",
+            model="text-embedding-ada-002",
             input=text
         )
         return response.data[0].embedding
@@ -126,7 +126,7 @@ async def get_relevant_chunks(query: str, k: int = 5):
     try:
         # Get embedding for the query
         embedding_response = openai.embeddings.create(
-            model="text-embedding-3-small",
+            model="text-embedding-ada-002",
             input=query
         )
         query_embedding = embedding_response.data[0].embedding
@@ -144,20 +144,49 @@ async def get_relevant_chunks(query: str, k: int = 5):
         
         # Compute similarity for each chunk
         for chunk in chunks:
-            chunk_embedding = np.array(chunk["embedding"])
-            chunk["similarity"] = cosine_similarity(query_embedding, chunk_embedding)
-
-            chunk["content"] = chunk["chunk"]
-            chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
+            try:
+                # Convert embedding to numpy array
+                chunk_embedding = np.array(chunk["embedding"])
+                if len(chunk_embedding) != len(query_embedding):
+                    logging.warning(f"Chunk embedding length mismatch: {len(chunk_embedding)} vs {len(query_embedding)}")
+                    continue
+                chunk["similarity"] = cosine_similarity(query_embedding, chunk_embedding)
+                chunk["content"] = chunk["chunk"]
+                chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
+            except Exception as e:
+                logging.error(f"Error processing chunk {chunk['id']}: {e}")
+                continue
+        # Filter out chunks with no similarity score
+        valid_chunks = [chunk for chunk in chunks if "similarity" in chunk]
+        logging.info(f"Valid chunks with similarity: {len(valid_chunks)}")
         
         # Sort by similarity and return top k
         top_chunks = sorted(chunks, key=lambda x: x["similarity"], reverse=True)[:k]
+        # Log similarity scores for debugging
+        for i, chunk in enumerate(top_chunks):
+            logging.info(f"Chunk {i+1}: similarity={chunk['similarity']:.3f}, source={chunk['source']}")
         
         return top_chunks
         
     except Exception as e:
         logging.error("❌ Error getting matching chunks:", exc_info=True)
         return []
+
+@app.get("/debug/chunks")
+async def debug_chunks():
+    """Debug endpoint to see what chunks are in the database"""
+    try:
+        response = supabase.table("juno_embeddings").select(
+            "id, page_name, source_file, chunk_index"
+        ).limit(10).execute()
+        
+        return {
+            "total_chunks": len(response.data),
+            "sample_chunks": response.data,
+            "table_structure": "juno_embeddings table accessed successfully"
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/query")
 async def queryKnowledgeBase(query: QueryRequest):
@@ -224,13 +253,14 @@ Context quality: Based on the similarity scores, prioritize information from hig
         
         # Determine confidence based on similarity scores
         avg_similarity = sum(r.get("similarity", 0) for r in results) / len(results)
-        confidence = "high" if avg_similarity > 0.8 else "medium" if avg_similarity > 0.6 else "low"
+        confidence = "high" if avg_similarity > 0.7 else "medium" if avg_similarity > 0.5 else "low"
         
         return {
             "answer": answer,
             "sources": sources,
             "confidence": confidence,
-            "context_used": len(results)
+            "context_used": len(results),
+            "debug_info": f"avg similarity={avg_similarity:.3f}"
         }
         
     except Exception as e:
