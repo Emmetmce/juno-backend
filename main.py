@@ -7,6 +7,8 @@ from supabase.client import create_client, Client
 from notion_util import get_page_content  
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+import json
+
 
 #logging for debugging
 import logging
@@ -129,7 +131,7 @@ async def get_relevant_chunks(query: str, k: int = 5):
             model="text-embedding-ada-002",
             input=query
         )
-        query_embedding = embedding_response.data[0].embedding
+        query_embedding = np.array(embedding_response.data[0].embedding, dtype=np.float32)
         
         # Query Supabase using the match_documents function (if you have it)
         # or fetch all and compute similarity
@@ -145,8 +147,12 @@ async def get_relevant_chunks(query: str, k: int = 5):
         # Compute similarity for each chunk
         for chunk in chunks:
             try:
-                # Convert embedding to numpy array
-                chunk_embedding = np.array(chunk["embedding"])
+                # Convert embedding to json
+                chunk_embedding = chunk["embedding"]
+                if isinstance(chunk_embedding, str):
+                    chunk_embedding = np.array(json.loads(chunk_embedding), dtype=np.float32)
+                else:
+                    chunk_embedding = np.array(chunk_embedding, dtype=np.float32)
                 if len(chunk_embedding) != len(query_embedding):
                     logging.warning(f"Chunk embedding length mismatch: {len(chunk_embedding)} vs {len(query_embedding)}")
                     continue
@@ -235,8 +241,15 @@ async def debug_search_test():
         similarities = []
         for chunk in response.data:
             try:
-                chunk_embedding = np.array(chunk["embedding"])
-                similarity = cosine_similarity(query_embedding, chunk_embedding)
+                embedding_raw = chunk["embedding"]
+        
+                if isinstance(embedding_raw, str):
+                    embedding_vector = np.array(json.loads(embedding_raw), dtype=np.float32)
+                else:
+                    embedding_vector = np.array(embedding_raw, dtype=np.float32)
+
+                similarity = cosine_similarity(query_embedding, embedding_vector)
+
                 similarities.append({
                     "id": chunk["id"],
                     "page_name": chunk["page_name"],

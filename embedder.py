@@ -8,6 +8,7 @@ from notion_client import Client
 from notion_util import extract_blocks_from_page 
 import hashlib
 import tiktoken
+import json
 
 
 # Setup logging
@@ -161,16 +162,15 @@ def embed_and_store(file_path, page_name):
             try:
                 # Get embedding from OpenAI
                 response = openai.embeddings.create(
-                    model="text-embedding-ada-002",
-                    input=chunk
-                )
-                vector = response.data[0].embedding
+                    input=chunk,
+                    model="text-embedding-ada-002"
+                ).data[0].embedding
                 
                 # Insert the chunk and its embedding into the Supabase table
                 supabase.table("juno_embeddings").insert({
                     "page_name": page_name,
                     "chunk": chunk,
-                    "embedding": vector,
+                    "embedding": json.dumps(response),  # Store as JSON string
                     "source_file": file_path,
                     "chunk_index": i,
                     "file_hash": file_hash,
