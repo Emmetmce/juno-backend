@@ -174,18 +174,93 @@ async def get_relevant_chunks(query: str, k: int = 5):
 
 @app.get("/debug/chunks")
 async def debug_chunks():
-    """Debug endpoint to see what chunks are in the database"""
-    try:
+   """Debug endpoint to see what chunks are in the database"""
+   try:
+        # Check total count
+        count_response = supabase.table("juno_embeddings").select("id", count="exact").execute()
+        total_count = count_response.count if hasattr(count_response, 'count') else 0
+        
+        # Get sample data
         response = supabase.table("juno_embeddings").select(
-            "id, page_name, source_file, chunk_index"
-        ).limit(10).execute()
+            "id, page_name, source_file, chunk_index, chunk"
+        ).limit(5).execute()
+        
+        # Get first few characters of each chunk for preview
+        sample_chunks = []
+        for chunk in response.data:
+            sample_chunks.append({
+                "id": chunk.get("id"),
+                "page_name": chunk.get("page_name"),
+                "source_file": chunk.get("source_file"),
+                "chunk_index": chunk.get("chunk_index"),
+                "chunk_preview": chunk.get("chunk", "")[:200] + "..." if len(chunk.get("chunk", "")) > 200 else chunk.get("chunk", "")
+            })
         
         return {
-            "total_chunks": len(response.data),
-            "sample_chunks": response.data,
-            "table_structure": "juno_embeddings table accessed successfully"
+            "total_chunks": total_count,
+            "sample_chunks": sample_chunks,
+            "table_structure": "juno_embeddings table accessed successfully",
+            "database_status": "connected"
         }
+   except Exception as e:
+        logging.error(f"Debug endpoint error: {e}")
+        return {
+            "error": str(e),
+            "database_status": "error"
+        }
+
+@app.get("/debug/search-test")
+async def debug_search_test():
+    """Test search functionality with a simple query"""
+    try:
+        # Test with a simple query
+        test_query = "podcast"
+        
+        # Get embedding
+        embedding_response = openai.embeddings.create(
+            model="text-embedding-ada-002",  # Make sure this matches your embedder
+            input=test_query
+        )
+        query_embedding = embedding_response.data[0].embedding
+        
+        # Get all chunks with embeddings
+        response = supabase.table("juno_embeddings").select(
+            "id, page_name, chunk, embedding"
+        ).limit(10).execute()
+        
+        if not response.data:
+            return {"error": "No data in database"}
+        
+        # Calculate similarities
+        similarities = []
+        for chunk in response.data:
+            try:
+                chunk_embedding = np.array(chunk["embedding"])
+                similarity = cosine_similarity(query_embedding, chunk_embedding)
+                similarities.append({
+                    "id": chunk["id"],
+                    "page_name": chunk["page_name"],
+                    "similarity": round(similarity, 4),
+                    "chunk_preview": chunk["chunk"][:100] + "..."
+                })
+            except Exception as e:
+                similarities.append({
+                    "id": chunk["id"],
+                    "error": str(e)
+                })
+        
+        # Sort by similarity
+        similarities.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+        
+        return {
+            "test_query": test_query,
+            "embedding_dimension": len(query_embedding),
+            "chunks_tested": len(response.data),
+            "top_similarities": similarities[:5]
+        }
+        
     except Exception as e:
+        logging.error(f"Search test error: {e}")
         return {"error": str(e)}
 
 @app.post("/query")
