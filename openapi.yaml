@@ -1,6 +1,7 @@
 openapi: 3.1.0
 info:
   title: Juno Memory API
+  description: API for querying Junk Kouture knowledge base using vector embeddings
   version: 1.0.0
 servers:
   - url: https://juno-backend-7lj5.onrender.com
@@ -9,6 +10,7 @@ paths:
     post:
       operationId: queryKnowledgeBase
       summary: Query the Juno knowledge base
+      description: Searches the embedded knowledge base and returns AI-generated answers
       requestBody:
         required: true
         content:
@@ -18,19 +20,114 @@ paths:
               properties:
                 query:
                   type: string
+                  description: The user's question or search query
+                  example: "What are the rules for Junk Kouture competition?"
+              required:
+                - query
       responses:
         '200':
-          description: Matching content from the knowledge base
+          description: AI-generated answer based on knowledge base content
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  matches:
+                  answer:
+                    type: string
+                    description: AI-generated answer based on knowledge base content
+                    example: "According to the competition handbook, participants must..."
+                  sources:
                     type: array
+                    description: List of sources used to generate the answer
                     items:
-                      type: string
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: Source name
+                        similarity:
+                          type: number
+                          description: Similarity score
+                        rank:
+                          type: integer
+                          description: Source ranking
+                  confidence:
+                    type: string
+                    description: Confidence level of the answer
+                    enum: [high, medium, low]
+                  context_used:
+                    type: integer
+                    description: Number of content chunks used
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
 
-components: 
+  /get-content:
+    get:
+      operationId: getNotionContent
+      summary: Get specific Notion page content
+      description: Retrieves content from a specific Notion page by title
+      parameters:
+        - name: page_name
+          in: query
+          required: true
+          description: Title of the Notion page to retrieve
+          schema:
+            type: string
+            example: "Competition Rules"
+      responses:
+        '200':
+          description: Notion page content retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  content:
+                    type: string
+                    description: Raw content from the Notion page
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+
+  /ping:
+    get:
+      operationId: healthCheck
+      summary: Health check endpoint
+      description: Simple endpoint to check if the API is running
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+
+components:
   schemas: {}
 security: []

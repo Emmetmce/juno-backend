@@ -72,25 +72,118 @@ def cosine_similarity(a, b):
 
 @app.post("/query")
 async def query_knowledge_base(query: QueryRequest):
-    logging.info("/query route hit")
-    try:
-        logging.info(f"Received query: {query.query}")
-        embedded_query = embed_text(query.query)
-        logging.info("Query embedded successfully")
+    logging.info(f"Received query: {query.query}")
 
-        response = supabase.rpc("match_juno_embeddings", {
-            "query_embedding": embedded_query,
-            "match_threshold": 0.8,
-            "match_count": 5
-        }).execute()
+    try: 
+        user_question = query.query
 
-        if response.error:
-            logging.error(f"Supabase RPC error: {response.error}")
-            raise HTTPException(status_code=500, detail=response.error.message)
+        #get relevant chunks from supabase
+        results = await get_relevant_chunks(user_question, k=5)
+        
+        if not results:
+            return {
+                "answer": "I couldn't find that information in the embedded knowledge base.",
+                "sources": [],
+                "confidence": "low"
+            }
+        
+        # 2. Build context from chunk content
+        context_parts = []
+        sources = []
+        
+        for i, result in enumerate(results, 1):
+            content = result["content"]
+            source = result.get("source") or result.get("page_name") or result.get("file_name", "Unknown")
+            similarity = result.get("similarity", 0)
+            
+            context_parts.append(f"[Source {i}: {source}]\n{content}")
+            sources.append({
+                "name": source,
+                "similarity": round(similarity, 3),
+                "rank": i
+            })
+        
+        context = "\n\n".join(context_parts)
+        
+        # 3. Enhanced system prompt for better responses
+        system_prompt = """You are Juno, a Digital Intelligence assistant for Junk Kouture.
 
-        logging.info(f"Supabase returned {len(response.data)} matches")
-        return {"results": response.data}
+IMPORTANT INSTRUCTIONS:
+- Use ONLY the provided context to answer questions
+- If the answer is not in the context, say: "I couldn't find that information in the embedded knowledge base."
+- When referencing information, mention the source (e.g., "According to [Source 1]...")
+- Be specific and detailed when the context supports it
+- If multiple sources have conflicting information, mention both perspectives
+- Do NOT make assumptions or add information not in the context
 
+Context quality: Based on the similarity scores, prioritize information from higher-ranked sources."""
+
+        # Make API call with client syntax
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {user_question}"}
+            ],
+            temperature=0.1,  # Lower temperature for more consistent responses
+            max_tokens=1000
+        )
+        
+        answer = response.choices[0].message.content
+        
+        # Determine confidence based on similarity scores
+        avg_similarity = sum(r.get("similarity", 0) for r in results) / len(results)
+        confidence = "high" if avg_similarity > 0.8 else "medium" if avg_similarity > 0.6 else "low"
+        
+        return {
+            "answer": answer,
+            "sources": sources,
+            "confidence": confidence,
+            "context_used": len(results)
+        }
+        
     except Exception as e:
-        logging.exception("Exception in /query")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error("❌ Error in query endpoint:", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+async def get_relevant_chunks(query: str, k: int = 5):
+    """
+    Get top k matching chunks from Supabase using vector similarity
+    """
+    try:
+        # Get embedding for the query
+        embedding_response = openai.embeddings.create(
+            model="text-embedding-3-small",
+            input=query
+        )
+        query_embedding = embedding_response.data[0].embedding
+        
+        # Query Supabase using the match_documents function (if you have it)
+        # or fetch all and compute similarity
+        response = supabase.table("juno_embeddings").select(
+            "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash"
+        ).execute()
+        
+        if not response.data:
+            return []
+        
+        chunks = response.data
+        
+        # Compute similarity for each chunk
+        for chunk in chunks:
+            chunk_embedding = np.array(chunk["embedding"])
+            chunk["similarity"] = cosine_similarity(query_embedding, chunk_embedding)
+
+            chunk["content"] = chunk["chunk"]
+            chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
+        
+        # Sort by similarity and return top k
+        top_chunks = sorted(chunks, key=lambda x: x["similarity"], reverse=True)[:k]
+        
+        return top_chunks
+        
+    except Exception as e:
+        logging.error("❌ Error getting matching chunks:", exc_info=True)
+        return []
