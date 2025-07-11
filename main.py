@@ -248,7 +248,7 @@ async def debug_search_test():
                 else:
                     embedding_vector = np.array(embedding_raw, dtype=np.float32)
 
-                similarity = cosine_similarity(query_embedding, embedding_vector)
+                similarity = float(cosine_similarity(query_embedding, embedding_vector))
 
                 similarities.append({
                     "id": chunk["id"],
@@ -300,12 +300,12 @@ async def queryKnowledgeBase(query: QueryRequest):
         for i, result in enumerate(results, 1):
             content = result["content"]
             source = result.get("source") or result.get("page_name") or result.get("file_name", "Unknown")
-            similarity = result.get("similarity", 0)
+            similarity = float(result.get("similarity", 0))
             
             context_parts.append(f"[Source {i}: {source}]\n{content}")
             sources.append({
                 "name": source,
-                "similarity": round(similarity, 3),
+                "similarity": round(float(similarity, 3)),
                 "rank": i
             })
         
@@ -340,7 +340,7 @@ Context quality: Based on the similarity scores, prioritize information from hig
         answer = response.choices[0].message.content
         
         # Determine confidence based on similarity scores
-        avg_similarity = sum(r.get("similarity", 0) for r in results) / len(results)
+        avg_similarity = sum(float(r.get("similarity", 0)) for r in results) / len(results)
         confidence = "high" if avg_similarity > 0.7 else "medium" if avg_similarity > 0.5 else "low"
         
         return {
