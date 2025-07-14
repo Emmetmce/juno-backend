@@ -118,7 +118,7 @@ def getNotionContent(page_name: str = Query(..., description="Title of Notion pa
 class QueryRequest(BaseModel):
     query: str
 
-def cosine_similarity(a, b):
+def calc_cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 async def get_relevant_chunks(query: str, k: int = 5):
@@ -156,7 +156,7 @@ async def get_relevant_chunks(query: str, k: int = 5):
                 if len(chunk_embedding) != len(query_embedding):
                     logging.warning(f"Chunk embedding length mismatch: {len(chunk_embedding)} vs {len(query_embedding)}")
                     continue
-                chunk["similarity"] = cosine_similarity(query_embedding, chunk_embedding)
+                chunk["similarity"] = calc_cosine_similarity(query_embedding, chunk_embedding)
                 chunk["content"] = chunk["chunk"]
                 chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
             except Exception as e:
@@ -167,7 +167,7 @@ async def get_relevant_chunks(query: str, k: int = 5):
         logging.info(f"Valid chunks with similarity: {len(valid_chunks)}")
         
         # Sort by similarity and return top k
-        top_chunks = sorted(chunks, key=lambda x: x["similarity"], reverse=True)[:k]
+        top_chunks = sorted(valid_chunks, key=lambda x: x["similarity"], reverse=True)[:k]
         # Log similarity scores for debugging
         for i, chunk in enumerate(top_chunks):
             logging.info(f"Chunk {i+1}: similarity={chunk['similarity']:.3f}, source={chunk['source']}")
@@ -248,7 +248,7 @@ async def debug_search_test():
                 else:
                     embedding_vector = np.array(embedding_raw, dtype=np.float32)
 
-                similarity = float(cosine_similarity(query_embedding, embedding_vector))
+                similarity = calc_cosine_similarity(query_embedding, embedding_vector)
 
                 similarities.append({
                     "id": chunk["id"],
@@ -300,12 +300,12 @@ async def queryKnowledgeBase(query: QueryRequest):
         for i, result in enumerate(results, 1):
             content = result["content"]
             source = result.get("source") or result.get("page_name") or result.get("file_name", "Unknown")
-            similarity = float(result.get("similarity", 0))
+            similarity = result.get("similarity", 0.0)
             
             context_parts.append(f"[Source {i}: {source}]\n{content}")
             sources.append({
                 "name": source,
-                "similarity": round(float(similarity, 3)),
+                "similarity": round(float(result.get("similarity")) if isinstance(similarity, (int, float, np.floating)) else 0.0, 3),
                 "rank": i
             })
         
@@ -340,7 +340,7 @@ Context quality: Based on the similarity scores, prioritize information from hig
         answer = response.choices[0].message.content
         
         # Determine confidence based on similarity scores
-        avg_similarity = sum(float(r.get("similarity", 0)) for r in results) / len(results)
+        avg_similarity = sum((r.get("similarity", 0)) for r in results) / len(results)
         confidence = "high" if avg_similarity > 0.7 else "medium" if avg_similarity > 0.5 else "low"
         
         return {
