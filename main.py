@@ -1,13 +1,14 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 import os
 import openai
 import numpy as np
 from supabase.client import create_client, Client
-from notion_util import get_page_content  
+from notion_util import get_page_content, upload_file_to_existing_page, add_file_to_notion_page
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
+from typing import List, Literal
 
 
 #logging for debugging
@@ -32,6 +33,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
 
 #env setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -112,7 +114,110 @@ def getNotionContent(page_name: str = Query(..., description="Title of Notion pa
         return {"content": content}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+# TODO: make 'save chat' endpoint to save chat history with Juno to Notion
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
 
+class SaveChatRequest(BaseModel):
+    chat_id: str
+    messages: List[ChatMessage]
+    destination: Literal["notion", "supabase", "both"] = "notion"  # Default to Notion
+    notion_page_name: str = None  # Optional Notion page ID if saving to Notion
+
+@app.post("/save_chat")
+async def saveChat(req: SaveChatRequest):
+    logging.info(f"💬 /save_chat route hit for {req.chat_id}")
+
+    try:
+        #add timestamp to filename to avoid conflicts
+        import time
+        timestamp = int(time.time())
+
+        # Format chat as markdown
+        transcript_md = f"# Chat ID: {req.chat_id}\n\n"
+        transcript_md += f"**Saved at:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+
+        for msg in req.messages:
+            prefix = "You" if msg.role == "user" else "Juno" #can change you to user name later
+            transcript_md += f"**{prefix}:** {msg.content.strip()}\n\n"
+
+        filename = f"{req.chat_id}_{timestamp}.md"
+        file_bytes = transcript_md.encode("utf-8")
+
+        #save to Supabase storage
+        if req.destination in ["supabase", "both"]:
+            supabase.storage.from_("chats").upload(path=filename, file=file_bytes, file_options={"content-type": "text/markdown"})
+            logging.info(f"Saved to Supabase: {filename}")
+        #save to notion storage
+        if req.destination in ["notion", "both"]:
+            if not req.notion_page_name:
+                raise HTTPException(status_code=400, detail="Missing `notion_page_name` to upload file")
+            #upload to supabase first to get public URL
+            supabase.storage.from_("user.uploaded.notion.files").upload(
+                path=filename,
+                file=file_bytes,
+                file_options={"content-type": "text/markdown"}
+            )
+
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/user.uploaded.notion.files/{filename}"
+            add_file_to_notion_page(req.notion_page_name, filename, public_url)
+            logging.info(f"Saved to Notion page: {req.notion_page_name} with file {filename}")
+
+        return {"status": "success", "saved_as": filename, "chat_id":req.chat_id, "timestamp": timestamp}
+
+    except Exception as e:
+        logging.error(f"❌ Error saving chat: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error saving chat: {str(e)}")
+    
+# TODO: make 'save file' endpoint to save files to Notion
+@app.post("/upload_file")
+async def upload_file(file: UploadFile, notion_page_name: str):
+    logging.info(f"/upload_file route hit for page: {notion_page_name}")
+
+    try:
+        file_bytes = await file.read()
+        filename = file.filename
+
+        #add timestamp to filename to avoid conflicts
+        import time
+        timestamp = int(time.time())
+        name_parts = filename.rsplit('.', 1)
+        if len(name_parts) == 2:
+            unique_filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
+        else:
+            unique_filename = f"{filename}_{timestamp}"
+
+        # Upload to Supabase public bucket
+        supabase.storage.from_("user.uploaded.notion.files").upload(
+            path=unique_filename,
+            file=file_bytes
+        )
+
+        # Construct public URL
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/user.uploaded.notion.files/{unique_filename}"
+
+        # Upload to Notion
+        logging.info(f"About to call add_file_to_notion_page with: {notion_page_name}")
+        add_file_to_notion_page(notion_page_name, unique_filename, public_url)
+
+        try:
+            result = {}
+            result["status"] = "success"
+            result["filename"] = unique_filename
+            result["original_filename"] = filename
+            result["url"] = public_url
+            result["notion_page"] = notion_page_name
+            
+            logging.info(f"✅ Return object built successfully: {result}")
+            return result
+        except Exception as return_error:
+            logging.error(f"❌ Error building return object: {str(return_error)}")
+            return {"status": "success", "message": "file uploaded successfully to notion and supabase"}
+    except Exception as e:
+        logging.error(f"❌ Error uploading file: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Query embedding class
 class QueryRequest(BaseModel):

@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from urllib.parse import urlparse
 import time
 import logging
+from supabase import create_client
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -210,6 +211,28 @@ def extract_blocks_from_page(page_id):
         logger.error(f"Error extracting blocks from page {page_id}: {e}")
         return f"Error extracting page content: {e}"
     
+def upload_file_to_existing_page(page_title: str, filename: str, file_bytes: bytes):
+    """Upload a file to Supabase and add it to an existing Notion page."""
+    try:
+        # Upload to Supabase
+        supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+        supabase.storage.from_("user.uploaded.notion.files").upload(
+            path=filename, 
+            file=file_bytes, 
+            file_options={"upsert": True}
+        )
+        
+        # Create public URL
+        SUPABASE_URL = os.getenv("SUPABASE_URL")  
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/user.uploaded.notion.files/{filename}"
+        
+        # Add to Notion page
+        add_file_to_notion_page(page_title, filename, public_url)
+
+    except Exception as e:
+        logger.error(f"❌ Failed to upload file to Notion page '{page_title}': {str(e)}")
+        raise
+
 def debug_page_blocks(page_id):
     """Debug function to see what blocks exist on a page"""
     try:
@@ -233,11 +256,52 @@ def debug_page_blocks(page_id):
     except Exception as e:
         logger.error(f"Error debugging page blocks: {e}")
         return []
+    
+# Function to add a file to an existing Notion page using a public URL
+def add_file_to_notion_page(page_title: str, filename: str, public_url: str):
+    """Add a file to an existing Notion page using a public URL."""
+    try:
+        # Search for the page
+        search = notion.search(query=page_title, filter={"value": "page", "property": "object"})
+        #function to check title matches and replace " " with "-"
+        def title_matches(page):
+            try:
+                return page_title.lower() in page["properties"]["title"]["title"][0]["text"]["content"].lower()
+            except:
+                return page_title.lower().replace(" ", "-") in page.get("url", "").lower()
+        page = next((p for p in search["results"] 
+                    if p["object"] == "page" and 
+                    title_matches(p)), None)
 
+        if not page:
+            raise ValueError(f"No matching page titled '{page_title}' found in Notion.")
+
+        page_id = page["id"]
+
+        # Add file block to the page
+        notion.blocks.children.append(
+            block_id=page_id,
+            children=[
+                {
+                    "object": "block",
+                    "type": "file",
+                    "file": {
+                        "type": "external",
+                        "external": {"url": public_url},
+                    }
+                }
+            ]
+        )
+        
+        logger.info(f"✅ Added file {filename} to Notion page '{page_title}'")
+
+    except Exception as e:
+        logger.error(f"❌ Failed to add file to Notion page '{page_title}': {str(e)}")
+        raise
 # Helper function to test the utility
 #def test_page_extraction(page_name):
-    """Test function to debug page extraction"""
-    logger.info(f"Testing extraction for page: {page_name}")
-    content = get_page_content(page_name)
-    logger.info(f"Extracted content length: {len(content)}")
-    return content
+    ###"""Test function to debug page extraction"""
+    #logger.info(f"Testing extraction for page: {notion_page_name}")
+    #content = get_page_content(page_name)
+    #logger.info(f"Extracted content length: {len(content)}")
+    ###return content
