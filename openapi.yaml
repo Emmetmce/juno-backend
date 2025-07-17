@@ -127,7 +127,120 @@ paths:
                   status:
                     type: string
                     example: "ok"
-
+  /upload_file:
+    post:
+      operationId: uploadFileToNotion
+      summary: Upload a file to Supabase and attach it to a Notion page
+      description: Receives a file and uploads it to Supabase, then attaches a reference to a Notion page
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filename:
+                  type: string
+                  description: Name of the file to upload (e.g., "brief.md")
+                file_content:
+                  type: string
+                  description: The file content in plain text
+                notion_page_name:
+                  type: string
+                  description: The Notion page to attach the file to
+              required:
+                - filename
+                - file_content
+                - notion_page_name
+      responses:
+        '200':
+          description: File uploaded and attached to Notion page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  url:
+                    type: string
+                    description: Public URL of the uploaded file
+                  notion_page:
+                    type: string
+                    description: The Notion page the file was attached to
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+  /save_chat:
+    post:
+      operationId: saveChatTranscript
+      summary: Save a chat or interview as a markdown transcript and upload to Notion and Supabase
+      description: Saves a chat conversation to a markdown file and stores it in Notion and/or Supabase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                chat_id:
+                  type: string
+                  description: Unique identifier for the chat, used as filename
+                messages:
+                  type: array
+                  description: List of chat messages
+                  items:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum: [user, assistant]
+                      content:
+                        type: string
+                    required:
+                      - role
+                      - content
+                destination:
+                  type: string
+                  enum: [notion, supabase, both]
+                  default: notion
+                notion_page_name:
+                  type: string
+                  description: The Notion page to upload the transcript to
+              required:
+                - chat_id
+                - messages
+                - notion_page_name
+      responses:
+        '200':
+          description: Chat successfully saved and uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  saved_as:
+                    type: string
+                    description: Name of the saved markdown file
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
 components:
   schemas: {}
 security: []
