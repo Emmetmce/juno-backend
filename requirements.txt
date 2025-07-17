@@ -8,3 +8,5 @@ httpx
 supabase
 PyPDF2
 requests
+python-multipart
+tiktoken
