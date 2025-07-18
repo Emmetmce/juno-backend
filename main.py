@@ -172,6 +172,7 @@ async def saveChat(req: SaveChatRequest):
         raise HTTPException(status_code=500, detail=f"Error saving chat: {str(e)}")
     
 # TODO: make 'save file' endpoint to save files to Notion
+#Multipart/form-data upload endpoint -- this does not work through the OpenAI chat interface, will work through a custom frontend
 @app.post("/upload_file")
 async def upload_file(file: UploadFile, notion_page_name: str):
     logging.info(f"/upload_file route hit for page: {notion_page_name}")
@@ -217,6 +218,42 @@ async def upload_file(file: UploadFile, notion_page_name: str):
             return {"status": "success", "message": "file uploaded successfully to notion and supabase"}
     except Exception as e:
         logging.error(f"❌ Error uploading file: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class FileUploadRequest(BaseModel):
+    filename: str
+    file_content: str  # supports txt, md, logs, yaml, json
+    notion_page_name: str
+
+@app.post("/upload_file_from_gpt")
+# Upload file from GPT chat interface to Notion and Supabase
+async def upload_file_from_gpt(payload: FileUploadRequest):
+    import time
+    try:
+        timestamp = int(time.time())
+        name_parts = payload.filename.rsplit(".", 1)
+        if len(name_parts) == 2:
+            unique_filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
+        else:
+            unique_filename = f"{payload.filename}_{timestamp}"
+
+        # Convert text to bytes
+        file_bytes = payload.file_content.encode("utf-8")
+
+        # Upload only to Notion (Supabase will be handled by embedder)
+        from notion_util import upload_file_to_existing_page
+        upload_file_to_existing_page(payload.notion_page_name, unique_filename, file_bytes)
+
+        logging.info(f"✅ Uploaded file '{unique_filename}' to Notion page '{payload.notion_page_name}'")
+
+        return {
+            "status": "success",
+            "filename": unique_filename,
+            "notion_page": payload.notion_page_name
+        }
+
+    except Exception as e:
+        logging.error(f"❌ Error uploading file via JSON: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Query embedding class

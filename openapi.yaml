@@ -127,57 +127,7 @@ paths:
                   status:
                     type: string
                     example: "ok"
-  /upload_file:
-    post:
-      operationId: uploadFileToNotion
-      summary: Upload a file to Supabase and attach it to a Notion page
-      description: Receives a file and uploads it to Supabase, then attaches a reference to a Notion page
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                filename:
-                  type: string
-                  description: Name of the file to upload (e.g., "brief.md")
-                file_content:
-                  type: string
-                  description: The file content in plain text
-                notion_page_name:
-                  type: string
-                  description: The Notion page to attach the file to
-              required:
-                - filename
-                - file_content
-                - notion_page_name
-      responses:
-        '200':
-          description: File uploaded and attached to Notion page
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: success
-                  url:
-                    type: string
-                    description: Public URL of the uploaded file
-                  notion_page:
-                    type: string
-                    description: The Notion page the file was attached to
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  detail:
-                    type: string
+
   /save_chat:
     post:
       operationId: saveChatTranscript
@@ -241,6 +191,58 @@ paths:
                 properties:
                   detail:
                     type: string
+  /upload_file_from_gpt:
+    post:
+      operationId: uploadTextFileToNotion
+      summary: Upload a text-based file and attach it to a Notion page
+      description: Accepts text-based file content via JSON and uploads it to a Notion page. Supports .txt, .md, .yaml, .log, and .json files.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filename:
+                  type: string
+                  description: Name of the file to upload (e.g., "notes.md")
+                file_content:
+                  type: string
+                  description: The full plain-text content of the file
+                notion_page_name:
+                  type: string
+                  description: Title of the Notion page to attach the file to
+              required:
+                - filename
+                - file_content
+                - notion_page_name
+      responses:
+        '200':
+          description: File successfully attached to Notion
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  filename:
+                    type: string
+                    description: The final uploaded filename
+                  notion_page:
+                    type: string
+                    description: The Notion page the file was attached to
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    
 components:
   schemas: {}
 security: []
