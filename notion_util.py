@@ -219,7 +219,7 @@ def upload_file_to_existing_page(page_title: str, filename: str, file_bytes: byt
         supabase.storage.from_("user.uploaded.notion.files").upload(
             path=filename, 
             file=file_bytes, 
-            file_options={"upsert": True}
+            file_options={"x-upsert": "true", "content-type": "application/octet-stream"}  # Use x-upsert for Supabase
         )
         
         # Create public URL
