@@ -259,26 +259,36 @@ def debug_page_blocks(page_id):
     
 # Function to add a file to an existing Notion page using a public URL
 def add_file_to_notion_page(page_title: str, filename: str, public_url: str):
-    """Add a file to an existing Notion page using a public URL."""
+    """Add a file to a full-page Notion page by title (no databases)."""
     try:
-        # Search for the page
-        search = notion.search(query=page_title, filter={"value": "page", "property": "object"})
-        #function to check title matches and replace " " with "-"
-        def title_matches(page):
-            try:
-                return page_title.lower() in page["properties"]["title"]["title"][0]["text"]["content"].lower()
-            except:
-                return page_title.lower().replace(" ", "-") in page.get("url", "").lower()
-        page = next((p for p in search["results"] 
-                    if p["object"] == "page" and 
-                    title_matches(p)), None)
+        def slugify(text):
+            import re
+            import unicodedata
+            text = unicodedata.normalize("NFKD", text)
+            text = text.encode("ascii", "ignore").decode("utf-8")  # remove accents
+            text = text.lower()
+            text = re.sub(r"[’'\"“”]", "", text)  # remove smart quotes
+            text = re.sub(r"[^\w\s-]", "", text)  # remove non-word characters
+            text = re.sub(r"[-\s]+", "-", text).strip("-_")  # convert spaces to dashes
+            return text
 
-        if not page:
+        normalized_title = slugify(page_title)
+        logger.info(f"🔎 Normalized slug to search for: {normalized_title}")
+
+        response = notion.search(query=page_title, filter={"value": "page", "property": "object"})
+        results = response.get("results", [])
+
+        for page in results:
+            url = page.get("url", "")
+            if slugify(url) and normalized_title in slugify(url):
+                page_id = page["id"]
+                break
+        else:
+            urls = [page.get("url", "") for page in results]
+            logger.warning(f"No match found for '{page_title}'. URLs returned: {urls}")
             raise ValueError(f"No matching page titled '{page_title}' found in Notion.")
 
-        page_id = page["id"]
-
-        # Add file block to the page
+        # Add the file
         notion.blocks.children.append(
             block_id=page_id,
             children=[
@@ -292,7 +302,7 @@ def add_file_to_notion_page(page_title: str, filename: str, public_url: str):
                 }
             ]
         )
-        
+
         logger.info(f"✅ Added file {filename} to Notion page '{page_title}'")
 
     except Exception as e:

@@ -183,15 +183,18 @@ async def upload_file(file: UploadFile = File(...), notion_page_name: str = Form
     try:
         file_bytes = await file.read()
         filename = file.filename
+        #wipe special characters from filename
+        import re, time
+        safe_filename = re.sub(r"[^a-zA-Z0-9_.-]", "_", filename)
 
-        #add timestamp to filename to avoid conflicts
-        import time
+        # Add timestamp
         timestamp = int(time.time())
-        name_parts = filename.rsplit('.', 1)
-        if len(name_parts) == 2:
-            unique_filename = f"{name_parts[0]}_{timestamp}.{name_parts[1]}"
+        parts = safe_filename.rsplit('.', 1)
+
+        if len(parts) == 2:
+            unique_filename = f"{parts[0]}_{timestamp}.{parts[1]}"
         else:
-            unique_filename = f"{filename}_{timestamp}"
+            unique_filename = f"{safe_filename}_{timestamp}"
 
         # Upload to Supabase public bucket
         try:
@@ -203,7 +206,7 @@ async def upload_file(file: UploadFile = File(...), notion_page_name: str = Form
                 file=file_bytes,
                 file_options={
                     "content-type": file.content_type or "application/octet-stream",
-                    "upsert": True
+                    "x-upsert": "true"
                 }
             )
             
