@@ -215,11 +215,11 @@ def upload_file_to_existing_page(page_title: str, filename: str, file_bytes: byt
     """Upload a file to Supabase and add it to an existing Notion page."""
     try:
         # Upload to Supabase
-        supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+        supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
         supabase.storage.from_("user.uploaded.notion.files").upload(
             path=filename, 
             file=file_bytes, 
-            file_options={"x-upsert": "true", "content-type": "application/octet-stream"}  # Use x-upsert for Supabase
+            file_options={"x-upsert": "true"}  # Use x-upsert for Supabase
         )
         
         # Create public URL

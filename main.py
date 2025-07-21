@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, UploadFile
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
 import os
 import openai
@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
 from typing import List, Literal
+from upload_ui import router as upload_ui_router
 
 
 #logging for debugging
@@ -33,11 +34,13 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
+#mount the upload UI router
+app.include_router(upload_ui_router)
 
 #env setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # create Supabase client and set OpenAI API key
@@ -48,11 +51,11 @@ if not OPENAI_API_KEY:
 openai.api_key = OPENAI_API_KEY
 
 # Supabase client
-if not SUPABASE_URL or not SUPABASE_KEY:
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     logging.info("Supabase credentials are not properly configured")
-    raise ValueError("SUPABASE_URL and SUPABASE_KEY are required")
+    raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 def embed_text(text: str):
     """Generate embedding for text using OpenAI"""
@@ -174,7 +177,7 @@ async def saveChat(req: SaveChatRequest):
 # TODO: make 'save file' endpoint to save files to Notion
 #Multipart/form-data upload endpoint -- this does not work through the OpenAI chat interface, will work through a custom frontend
 @app.post("/upload_file")
-async def upload_file(file: UploadFile, notion_page_name: str):
+async def upload_file(file: UploadFile = File(...), notion_page_name: str = Form(...)):
     logging.info(f"/upload_file route hit for page: {notion_page_name}")
 
     try:
@@ -191,13 +194,28 @@ async def upload_file(file: UploadFile, notion_page_name: str):
             unique_filename = f"{filename}_{timestamp}"
 
         # Upload to Supabase public bucket
-        supabase.storage.from_("user.uploaded.notion.files").upload(
-            path=unique_filename,
-            file=file_bytes
-        )
+        try:
+            # Use service role client
+            service_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            
+            supabase_response = service_client.storage.from_("user.uploaded.notion.files").upload(
+                path=unique_filename,
+                file=file_bytes,
+                file_options={
+                    "content-type": file.content_type or "application/octet-stream",
+                    "upsert": True
+                }
+            )
+            
+            logging.info(f"📁 Supabase upload response: {supabase_response}")
+            
+        except Exception as e:
+            logging.error(f"❌ Upload method failed: {e}")
 
-        # Construct public URL
-        public_url = f"{SUPABASE_URL}/storage/v1/object/public/user.uploaded.notion.files/{unique_filename}"
+        if 'public_url' not in locals():
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/user.uploaded.notion.files/{unique_filename}"
+
+        logging.info(f"📁 Public URL: {public_url}")
 
         # Upload to Notion
         logging.info(f"About to call add_file_to_notion_page with: {notion_page_name}")
@@ -496,4 +514,26 @@ Context quality: Based on the similarity scores, prioritize information from hig
     except Exception as e:
         logging.error("❌ Error in query endpoint:", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+@app.get("/upload-link")
+async def get_upload_link(
+    page: str = Query(None, description="Suggested Notion page name"),
+    file_type: str = Query(None, description="Expected file type hint")
+):
+    """Generate an upload link for the GPT to share with users"""
+    
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000")
+    upload_url = f"{base_url}/upload"
+    
+    # Add page suggestion if provided
+    if page:
+        upload_url += f"?page={page.replace(' ', '%20')}"
+    
+    return {
+        "upload_url": upload_url,
+        "instructions": f"Click this link to upload your file to Juno: {upload_url}",
+        "suggested_page": page,
+        "message": "This will open a secure upload form where you can select your file and choose the destination page."
+    }
+
 
