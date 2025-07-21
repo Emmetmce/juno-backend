@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 from typing import List, Literal
 from upload_ui import router as upload_ui_router
+from fastapi.staticfiles import StaticFiles
+
 
 
 #logging for debugging
@@ -36,6 +38,7 @@ app.add_middleware(
 )
 #mount the upload UI router
 app.include_router(upload_ui_router)
+app.mount("/static", StaticFiles(directory="static"), name="static") 
 
 #env setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
