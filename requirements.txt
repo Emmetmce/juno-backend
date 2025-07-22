@@ -10,3 +10,8 @@ PyPDF2
 requests
 python-multipart
 tiktoken
+pytesseract
+Pillow
+PyMuPDF
+python-docx
+logging

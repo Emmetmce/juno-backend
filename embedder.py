@@ -9,7 +9,25 @@ from notion_util import extract_blocks_from_page
 import hashlib
 import tiktoken
 import json
+# This script extracts content from Notion pages and attached files, embeds them using OpenAI embeddings,
+# and stores the embeddings in a Supabase PostgreSQL vector database for semantic retrieval by Juno.
 
+#imports for enhanced file processing
+import fitz  # PyMuPDF for PDF parsing
+try:
+    import docx  # python-docx for DOCX files
+except ImportError:
+    docx = None
+    logging.warning("python-docx not installed. DOCX support disabled.")
+
+try:
+    from PIL import Image
+    import pytesseract
+    import io
+except ImportError:
+    Image = None
+    pytesseract = None
+    logging.warning("PIL/pytesseract not installed. OCR support disabled.")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +44,102 @@ openai.api_key = OPENAI_API_KEY
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 notion = Client(auth=os.getenv("NOTION_TOKEN"))
 
+def extract_text_from_pdf(file_path: str) -> str:
+    """Extracts text from a PDF file, including image OCR if available."""
+    extracted_text = []
+    try:
+        with fitz.open(file_path) as doc:
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+
+                #get regular text
+                text = page.get_text()
+                if text.strip():
+                    extracted_text.append(f"Page {page_num + 1}:\n{text.strip()}\n")
+                #get images and perform OCR if available
+                if Image and pytesseract:
+                    for img_index, img in enumerate(page.get_images(full=True)):
+                        try:
+                            xref = img[0]
+                            base_image = doc.extract_image(xref)
+                            image_bytes = base_image["image"]
+                            image = Image.open(io.BytesIO(image_bytes).convert("RGB"))  # Convert to RGB for OCR compatibility
+                            ocr_text = pytesseract.image_to_string(image)
+                            if ocr_text.strip():
+                                extracted_text.append(f"[Page {page_num + 1} - Image {img_index + 1}]\n{ocr_text.strip()}")
+                        except Exception as e:
+                            logger.warning(f"Error processing image on page {page_num + 1}: {e}")
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF file {file_path}: {e}")
+        return "\n\n".join(extracted_text)
+
+def extract_text_from_docx(file_path: str) -> str:
+    """Extracts text from a DOCX file."""
+    if not docx:
+        logger.warning("python-docx is not installed. Cannot process DOCX files.")
+        return ""
+    
+    text_parts = []
+    try:
+        doc = docx.Document(file_path)
+        for para in doc.paragraphs:
+            if para.text.strip():
+                text_parts.append(para.text.strip())
+        # Extract text from tables
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = []
+                for cell in row.cells:
+                    if cell.text.strip():
+                        row_text.append(cell.text.strip())
+                if row_text:
+                    text_parts.append(" | ".join(row_text))
+
+    except Exception as e:
+        logger.error(f"Error extracting text from DOCX file {file_path}: {e}")
+    return "\n".join(text_parts)
+
+def extract_text_from_image(file_path: str) -> str:
+    """Extracts text from an image file using OCR."""
+    if not Image or not pytesseract:
+        logger.warning("PIL/pytesseract is not installed. Cannot process image files.")
+        return ""
+    
+    try:
+        image = Image.open(file_path).convert("RGB")  # Convert to RGB for better OCR compatibility
+        text = pytesseract.image_to_string(image)
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Error extracting text from image file {file_path}: {e}")
+        return ""
+
+def enhanced_extract_text(file_path: str) -> str:
+    """Enhanced text extractor that handles multiple file types."""
+    file_type = file_path.lower()
+    
+    if file_type.endswith(".pdf"):
+        return extract_text_from_pdf(file_path)
+    elif file_type.endswith((".docx", ".doc")):
+        return extract_text_from_docx(file_path)
+    elif file_type.endswith((".png", ".jpg", ".jpeg", ".tiff", ".bmp")):
+        return extract_text_from_image(file_path)
+    elif file_type.endswith((".txt", ".md")):
+        # Use existing logic for text files
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"Error reading text file {file_path}: {e}")
+            return ""
+    else:
+        # Try to read as text file (fallback)
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"Cannot process file type for {file_path}: {e}")
+            return ""
+        
 def get_file_hash(file_path):
     """Generate a hash for the file to check if it has been processed"""
     try:
@@ -107,13 +221,7 @@ def split_text(text, max_tokens=2000):
     return chunks
 
 def embed_and_store(file_path, page_name):
-    """Embed file content and store in Supabase"""
-    #check if file has already been embedded
-    
-    # Skip unsupported file types
-    if not file_path.endswith((".txt", ".md", ".pdf")):
-        logger.warning(f"Skipping unsupported file type: {file_path}")
-        return
+    """Embed file content and store in Supabase, enhanced to handle various file types"""
     
     # Check if file exists
     if not os.path.exists(file_path):
@@ -124,19 +232,7 @@ def embed_and_store(file_path, page_name):
     file_hash = get_file_hash(file_path)
 
     try:
-        # Read text from PDF using PyPDF2
-        if file_path.endswith(".pdf"):
-            import PyPDF2
-            with open(file_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
-                # Extract text from all pages that contain text
-                text = "\n".join(
-                    page.extract_text() for page in reader.pages if page.extract_text()
-                )
-        else:
-            # Read text from .txt or .md files
-            with open(file_path, "r", encoding="utf-8") as f:
-                text = f.read()
+        text = enhanced_extract_text(file_path)
         
         if not text.strip():
             logger.warning(f"No text content found in {file_path}")
@@ -213,7 +309,7 @@ def get_page_title(page):
     return f"Page_{page['id']}"
 
 def batch_embed_all_notion_files(force_reprocess=False):#force_reprocess=False incase of overwriting existing data
-    """Search all Notion pages for files, embed them, and store in Supabase"""
+    """Search all Notion pages for files, embed them, and store in Supabase, enhanced with better file support"""
     logger.info("Connecting to Notion...")
     
     try:
@@ -222,7 +318,6 @@ def batch_embed_all_notion_files(force_reprocess=False):#force_reprocess=False i
         logger.info(f"Found {len(search_results)} pages from Notion search")
         
         total_files_processed = 0
-        total_files_skipped = 0
         
         for page in search_results:
             page_id = page["id"]
@@ -261,10 +356,9 @@ def batch_embed_all_notion_files(force_reprocess=False):#force_reprocess=False i
                         try:
                             with open(temp_file, "w", encoding="utf-8") as f:
                                 f.write(text_content)
-                                logger.info(f"Created temporary file for page content: {temp_file}")
-                                embed_and_store(temp_file, page_title)
-                                total_files_processed += 1
-
+                            logger.info(f"Created temporary file for page content: {temp_file}")
+                            embed_and_store(temp_file, page_title)
+                            total_files_processed += 1
                             os.remove(temp_file)  # Clean up
                         except Exception as e:
                             logger.error(f"Error processing page content for {page_title}: {e}")
@@ -308,6 +402,20 @@ def test_single_page(page_name):
 if __name__ == "__main__":
     # Uncomment the next line to test a specific page first
     # test_single_page("Competition Handbook & Rules")
+    logger.info("Starting enhanced embedder with PDF and multipart file support...")
+    
+    # Check for required dependencies
+    missing_deps = []
+    if not fitz:
+        missing_deps.append("PyMuPDF (pip install PyMuPDF)")
+    if not docx:
+        missing_deps.append("python-docx (pip install python-docx)")
+    if not Image or not pytesseract:
+        missing_deps.append("PIL and pytesseract (pip install Pillow pytesseract)")
+    
+    if missing_deps:
+        logger.warning(f"Missing optional dependencies: {', '.join(missing_deps)}")
+        logger.warning("Some file types may not be processed correctly.")
     
     batch_embed_all_notion_files(force_reprocess=False)  # Set to True to reprocess all pages
     # Note: This will process all Notion pages and embed their content/files into Supabase
