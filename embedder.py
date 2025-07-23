@@ -64,12 +64,13 @@ def extract_text_from_pdf(file_path: str) -> str:
                             base_image = doc.extract_image(xref)
                             image_bytes = base_image["image"]
                             image = Image.open(io.BytesIO(image_bytes))
-                            image.convert("RGB")  # Convert to RGB for OCR compatibility
+                            image = image.convert("RGB")  # Convert to RGB for OCR compatibility
                             ocr_text = pytesseract.image_to_string(image)
                             if ocr_text.strip():
                                 extracted_text.append(f"[Page {page_num + 1} - Image {img_index + 1}]\n{ocr_text.strip()}")
                         except Exception as e:
                             logger.warning(f"Error processing image on page {page_num + 1}: {e}")
+        return "\n\n".join(extracted_text)
     except Exception as e:
         logger.error(f"Error extracting text from PDF file {file_path}: {e}")
         return "\n\n".join(extracted_text)
@@ -134,6 +135,9 @@ def enhanced_extract_text(file_path: str) -> str:
             # Try to read as text file (fallback)
             with open(file_path, "r", encoding="utf-8") as f:
                 text = f.read()
+        if text is None:
+            logger.warning(f"Text extraction returned None for {file_path}")
+            return ""
         
         # Ensure we always return a string, even if empty
         return text if text is not None else ""
