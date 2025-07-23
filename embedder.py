@@ -54,7 +54,7 @@ def extract_text_from_pdf(file_path: str) -> str:
 
                 #get regular text
                 text = page.get_text()
-                if text.strip():
+                if text and text.strip(): 
                     extracted_text.append(f"Page {page_num + 1}:\n{text.strip()}\n")
                 #get images and perform OCR if available
                 if Image and pytesseract:
@@ -63,7 +63,8 @@ def extract_text_from_pdf(file_path: str) -> str:
                             xref = img[0]
                             base_image = doc.extract_image(xref)
                             image_bytes = base_image["image"]
-                            image = Image.open(io.BytesIO(image_bytes).convert("RGB"))  # Convert to RGB for OCR compatibility
+                            image = Image.open(io.BytesIO(image_bytes))
+                            image.convert("RGB")  # Convert to RGB for OCR compatibility
                             ocr_text = pytesseract.image_to_string(image)
                             if ocr_text.strip():
                                 extracted_text.append(f"[Page {page_num + 1} - Image {img_index + 1}]\n{ocr_text.strip()}")
@@ -106,7 +107,8 @@ def extract_text_from_image(file_path: str) -> str:
         return ""
     
     try:
-        image = Image.open(file_path).convert("RGB")  # Convert to RGB for better OCR compatibility
+        image = Image.open(file_path)
+        image.convert("RGB")  # Convert to RGB for better OCR compatibility
         text = pytesseract.image_to_string(image)
         return text.strip()
     except Exception as e:
@@ -117,28 +119,28 @@ def enhanced_extract_text(file_path: str) -> str:
     """Enhanced text extractor that handles multiple file types."""
     file_type = file_path.lower()
     
-    if file_type.endswith(".pdf"):
-        return extract_text_from_pdf(file_path)
-    elif file_type.endswith((".docx", ".doc")):
-        return extract_text_from_docx(file_path)
-    elif file_type.endswith((".png", ".jpg", ".jpeg", ".tiff", ".bmp")):
-        return extract_text_from_image(file_path)
-    elif file_type.endswith((".txt", ".md")):
-        # Use existing logic for text files
-        try:
+    try:
+        if file_type.endswith(".pdf"):
+            text = extract_text_from_pdf(file_path)
+        elif file_type.endswith((".docx", ".doc")):
+            text = extract_text_from_docx(file_path)
+        elif file_type.endswith((".png", ".jpg", ".jpeg", ".tiff", ".bmp")):
+            text = extract_text_from_image(file_path)
+        elif file_type.endswith((".txt", ".md")):
+            # Use existing logic for text files
             with open(file_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception as e:
-            logger.error(f"Error reading text file {file_path}: {e}")
-            return ""
-    else:
-        # Try to read as text file (fallback)
-        try:
+                text = f.read()
+        else:
+            # Try to read as text file (fallback)
             with open(file_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception as e:
-            logger.error(f"Cannot process file type for {file_path}: {e}")
-            return ""
+                text = f.read()
+        
+        # Ensure we always return a string, even if empty
+        return text if text is not None else ""
+        
+    except Exception as e:
+        logger.error(f"Cannot process file type for {file_path}: {e}")
+        return ""
         
 def get_file_hash(file_path):
     """Generate a hash for the file to check if it has been processed"""
