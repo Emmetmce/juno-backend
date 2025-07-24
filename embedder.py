@@ -9,6 +9,10 @@ from notion_util import extract_blocks_from_page
 import hashlib
 import tiktoken
 import json
+import base64
+import io
+from PIL import Image as PILImage
+
 # This script extracts content from Notion pages and attached files, embeds them using OpenAI embeddings,
 # and stores the embeddings in a Supabase PostgreSQL vector database for semantic retrieval by Juno.
 
@@ -237,52 +241,106 @@ def embed_and_store(file_path, page_name):
     #gen file hash for duplicate file checking
     file_hash = get_file_hash(file_path)
 
-    try:
-        text = enhanced_extract_text(file_path)
-        
-        if not text.strip():
-            logger.warning(f"No text content found in {file_path}")
-            return
-            
-    except Exception as e:
-        logger.error(f"Error reading {file_path}: {e}")
-        return
-    
-    # Split the full text into smaller chunks
-    chunks = split_text(text)
-    logger.info(f"Split {file_path} into {len(chunks)} chunks")
-    
-    # Embed each chunk and store in Supabase
-    for i, chunk in enumerate(chunks):
-
-        chunk_hash = hash_chunk(chunk) # Check if this chunk has already been embedded
-        result = supabase.table("juno_embeddings").select("id").eq("chunk_hash", chunk_hash).eq("page_name", page_name).limit(1).execute()
+    if is_image_file(file_path):
+        logger.info(f"Processing image file: {file_path}")
+        #check if image is already embedded
+        result = supabase.table("juno_embeddings").select("id").eq("file_hash", file_hash).eq("page_name", page_name).limit(1).execute()
         if result.data:
-            logger.info(f"Chunk {i+1}/{len(chunks)} already embedded. Skipping.")
-            continue
-        if chunk.strip():
-            try:
-                # Get embedding from OpenAI
-                response = openai.embeddings.create(
-                    input=chunk,
-                    model="text-embedding-ada-002"
-                ).data[0].embedding
+            logger.info(f"Image already embedded: {file_path}")
+            return
+        # Store image in Supabase storage
+        image_url = store_image(file_path, page_name)
+        if not image_url:
+            logger.error(f"Failed to store image: {file_path}")
+            return
+        description = get_image_description(file_path)
+        ocr_text = ""
+        try:
+            if Image and pytesseract:
+                ocr_text = extract_text_from_image(file_path)
+        except:
+            pass # If OCR fails, just skip it
+        #combine descruption and OCR text
+        searchable_text = f"Image: {description}"
+        if ocr_text.strip():
+            searchable_text += f"\n\nText in image: {ocr_text}"
+        
+        # Insert image metadata into Supabase
+        try:
+            response = openai.embeddings.create(
+                input=searchable_text,
+                model="text-embedding-ada-002"
+            ).data[0].embedding
+            
+            # Store in database with image metadata
+            supabase.table("juno_embeddings").insert({
+                "page_name": page_name,
+                "chunk": searchable_text,
+                "embedding": json.dumps(response),
+                "source_file": file_path,
+                "chunk_index": 0,
+                "file_hash": file_hash,
+                "chunk_hash": hash_chunk(searchable_text),
+                "file_type": "image",
+                "image_url": image_url,  # Store the public URL
+                "original_filename": os.path.basename(file_path),
+                "description": description  # Store the image description
+            }).execute()
+            
+            logger.info(f"Successfully embedded image: {file_path}")
+            
+        except Exception as e:
+            logger.error(f"Error embedding image {file_path}: {e}")
+    else:
+        # Regular file processing (PDF, DOCX, TXT, etc.)
+        try:
+            text = enhanced_extract_text(file_path)
+        
+            if not text.strip():
+                logger.warning(f"No text content found in {file_path}")
+                return
+            
+        except Exception as e:
+            logger.error(f"Error reading {file_path}: {e}")
+            return
+    
+        # Split the full text into smaller chunks
+        chunks = split_text(text)
+        logger.info(f"Split {file_path} into {len(chunks)} chunks")
+    
+        # Embed each chunk and store in Supabase
+        for i, chunk in enumerate(chunks):
+
+            chunk_hash = hash_chunk(chunk) # Check if this chunk has already been embedded
+            result = supabase.table("juno_embeddings").select("id").eq("chunk_hash", chunk_hash).eq("page_name", page_name).limit(1).execute()
+            if result.data:
+                logger.info(f"Chunk {i+1}/{len(chunks)} already embedded. Skipping.")
+                continue
+            if chunk.strip():
+                try:
+                    # Get embedding from OpenAI
+                    response = openai.embeddings.create(
+                        input=chunk,
+                        model="text-embedding-ada-002"
+                    ).data[0].embedding
                 
-                # Insert the chunk and its embedding into the Supabase table
-                supabase.table("juno_embeddings").insert({
-                    "page_name": page_name,
-                    "chunk": chunk,
-                    "embedding": json.dumps(response),  # Store as JSON string
-                    "source_file": file_path,
-                    "chunk_index": i,
-                    "file_hash": file_hash,
-                    "chunk_hash": chunk_hash 
-                }).execute()
+                    # Insert the chunk and its embedding into the Supabase table
+                    supabase.table("juno_embeddings").insert({
+                        "page_name": page_name,
+                        "chunk": chunk,
+                        "embedding": json.dumps(response),  # Store as JSON string
+                        "source_file": file_path,
+                        "chunk_index": i,
+                        "file_hash": file_hash,
+                        "chunk_hash": chunk_hash,
+                        "file_type": "document",
+                        "original_filename": os.path.basename(file_path),
+                    }).execute()
                 
-                logger.info(f"Inserted chunk {i+1}/{len(chunks)} from {file_path}")
+                    logger.info(f"Inserted chunk {i+1}/{len(chunks)} from {file_path}")
                 
-            except Exception as e:
-                logger.error(f"Error processing chunk {i} from {file_path}: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing chunk {i} from {file_path}: {e}")
 
 #should not be used in production, only for debugging because pages can have files added/removed
 def is_page_already_processed(page_name):
@@ -404,6 +462,172 @@ def test_single_page(page_name):
     logger.info(f"Found {len(file_paths)} files: {file_paths}")
     
     return content
+
+def is_image_file(file_path: str) -> bool:
+    """Check if a file is an image based on its extension"""
+    image_extensions = {".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".gif", ".webp", ".svg"}
+    return any(file_path.lower().endswith(ext) for ext in image_extensions)
+def store_image(file_path: str, page_name: str) -> str:
+    """Store image in Supabase storage and return public URL"""
+    try:
+        # Generate unique filename
+        file_hash = get_file_hash(file_path)
+        file_ext = os.path.splitext(file_path)[1]
+        storage_filename = f"{file_hash}{file_ext}"
+        
+        # Read image file
+        with open(file_path, 'rb') as f:
+            file_bytes = f.read()
+        
+        # Upload to Supabase storage
+        supabase.storage.from_("juno_images").upload(
+            path=storage_filename,
+            file=file_bytes,
+            file_options={"x-upsert": "true"}
+        )
+        
+        # Get public URL
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/juno_images/{storage_filename}"
+        
+        logger.info(f"Stored image in Supabase: {public_url}")
+        return public_url
+        
+    except Exception as e:
+        logger.error(f"Error storing image in Supabase: {e}")
+        return None
+def get_image_description(file_path: str) -> str:
+    """Generate description of image using OpenAI Vision API"""
+    try:
+        # Convert image to base64
+        with open(file_path, 'rb') as f:
+            image_bytes = f.read()
+        
+        # Resize if too large (OpenAI has size limits)
+        image = PILImage.open(io.BytesIO(image_bytes))
+        if image.width > 2000 or image.height > 2000:
+            image.thumbnail((2000, 2000), PILImage.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format='JPEG', quality=85)
+            image_bytes = buffer.getvalue()
+        
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Get description from OpenAI
+        response = openai.chat.completions.create(
+            model="gpt-4-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image in detail, including colors, objects, text, style, and any other relevant visual elements. This will be used for semantic search. Keep it to one sentence if possible but include all important details. Is it a logo, picture, or something else?"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=500
+        )
+        
+        description = response.choices[0].message.content
+        logger.info(f"Generated image description: {description[:100]}...")
+        return description
+        
+    except Exception as e:
+        logger.error(f"Error generating image description: {e}")
+        return f"Image file: {os.path.basename(file_path)}"
+
+def search_for_image(query: str, limit: int = 5):
+    """Search for images that match a query for Juno to use. 1. direct text search in file description, 
+    2. ocr text in images, 3. image similarity search using OpenAI embeddings"""
+    try:
+        all_results = []
+        seen_urls = set()  # Prevent duplicates
+        
+        # Method 1: Direct text search in description (FASTEST - SQL LIKE query)
+        description_results = supabase.table("juno_embeddings").select(
+            "page_name, description, image_url, original_filename, chunk"
+        ).eq('file_type', 'image').ilike('description', f'%{query}%').limit(limit).execute()
+        
+        for match in description_results.data:
+            if match['image_url'] not in seen_urls:
+                all_results.append({
+                    'page_name': match['page_name'],
+                    'description': match['description'],
+                    'image_url': match['image_url'],
+                    'filename': match['original_filename'],
+                    'similarity': 0.95,  # High confidence for exact text matches
+                    'match_type': 'description_match',
+                    'match_text': query
+                })
+                seen_urls.add(match['image_url'])
+        
+        # Method 2: Search in OCR text (for text found within images)
+        # Only search if we haven't found enough results yet
+        if len(all_results) < limit:
+            remaining_limit = limit - len(all_results)
+            ocr_results = supabase.table("juno_embeddings").select(
+                "page_name, description, image_url, original_filename, chunk"
+            ).eq('file_type', 'image').ilike('chunk', f'%Text in image: %{query}%').limit(remaining_limit).execute()
+            
+            for match in ocr_results.data:
+                if match['image_url'] not in seen_urls:
+                    all_results.append({
+                        'page_name': match['page_name'],
+                        'description': match['description'],
+                        'image_url': match['image_url'],
+                        'filename': match['original_filename'],
+                        'similarity': 0.90,  # High confidence for OCR matches
+                        'match_type': 'ocr_match',
+                        'match_text': query
+                    })
+                    seen_urls.add(match['image_url'])
+        
+        # Method 3: Semantic search using embeddings (SLOWER but finds conceptual matches)
+        # Only if we still need more results
+        if len(all_results) < limit:
+            remaining_limit = limit - len(all_results)
+            
+            # Get embedding for the search query
+            response = openai.embeddings.create(
+                input=query,
+                model="text-embedding-ada-002"
+            ).data[0].embedding
+            
+            # Semantic search
+            semantic_results = supabase.rpc('match_documents', {
+                'query_embedding': response,
+                'match_threshold': 0.6,  # Lower threshold for broader matches
+                'match_count': remaining_limit
+            }).eq('file_type', 'image').execute()
+            
+            for match in semantic_results.data:
+                if match['image_url'] not in seen_urls:
+                    all_results.append({
+                        'page_name': match['page_name'],
+                        'description': match.get('description', match['chunk']),
+                        'image_url': match['image_url'],
+                        'filename': match['original_filename'],
+                        'similarity': match.get('similarity', 0.7),
+                        'match_type': 'semantic_match',
+                        'match_text': None
+                    })
+                    seen_urls.add(match['image_url'])
+        
+        # Sort by similarity score (highest first)
+        all_results.sort(key=lambda x: x['similarity'], reverse=True)
+        
+        return all_results[:limit]
+        
+    except Exception as e:
+        logger.error(f"Error searching images: {e}")
+        return []
 
 if __name__ == "__main__":
     # Uncomment the next line to test a specific page first
