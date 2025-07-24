@@ -469,16 +469,17 @@ async def queryKnowledgeBase(query: QueryRequest):
             similarity = result.get("similarity", 0.0)
 
             #get image if available
-            if "image_url" in result:
-                image_url = result.get("image_url")
+            image_url = result.get("image_url")
             
             context_parts.append(f"[Source {i}: {source}]\n{content}")
-            sources.append({
+            source_data = {
                 "name": source,
                 "similarity": round(float(result.get("similarity")) if isinstance(similarity, (int, float, np.floating)) else 0.0, 3),
                 "rank": i,
-                **({"image_url": image_url} if "image_url" else {})
-            })
+            }
+            if image_url:
+                source_data["image_url"] = image_url
+            sources.append(source_data)
         
         context = "\n\n".join(context_parts)
         

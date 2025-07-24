@@ -514,7 +514,7 @@ def get_image_description(file_path: str) -> str:
         
         # Get description from OpenAI
         response = openai.chat.completions.create(
-            model="gpt-4-vision-preview",
+            model="gpt-4o",
             messages=[
                 {
                     "role": "user",
