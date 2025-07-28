@@ -287,7 +287,7 @@ class QueryRequest(BaseModel):
 def calc_cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-async def get_relevant_chunks(query: str, k: int = 5):
+async def get_relevant_chunks(query: str, k: int = 5, include_images: bool = True):
     """
     Get top k matching chunks from Supabase using vector similarity
     """
@@ -299,13 +299,18 @@ async def get_relevant_chunks(query: str, k: int = 5):
         )
         query_embedding = np.array(embedding_response.data[0].embedding, dtype=np.float32)
         
-        # Query Supabase using the match_documents function (if you have it)
-        # or fetch all and compute similarity
-        response = supabase.table("juno_embeddings").select(
-            "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash"
-        ).execute()
-        
+        # Query Supabase for both text and image results
+        if include_images:
+            response = supabase.table("juno_embeddings").select(
+                "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash, file_type, image_url, description, original_filename"
+            ).execute()
+        else:
+            # If images are not needed, query only text chunks
+            response = supabase.table("juno_embeddings").select(
+                "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash, file_type, description"
+            ).execute()
         if not response.data:
+            logging.info("No chunks found in the database")
             return []
         
         chunks = response.data
@@ -325,6 +330,13 @@ async def get_relevant_chunks(query: str, k: int = 5):
                 chunk["similarity"] = calc_cosine_similarity(query_embedding, chunk_embedding)
                 chunk["content"] = chunk["chunk"]
                 chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
+
+                #add image fields if available
+                if chunk.get("file_type") == "image":
+                    chunk["is_image"] = True
+                else:
+                    chunk["is_image"] = False
+
             except Exception as e:
                 logging.error(f"Error processing chunk {chunk['id']}: {e}")
                 continue
@@ -336,7 +348,8 @@ async def get_relevant_chunks(query: str, k: int = 5):
         top_chunks = sorted(valid_chunks, key=lambda x: x["similarity"], reverse=True)[:k]
         # Log similarity scores for debugging
         for i, chunk in enumerate(top_chunks):
-            logging.info(f"Chunk {i+1}: similarity={chunk['similarity']:.3f}, source={chunk['source']}")
+            chunk_type = "image" if chunk.get("is_image") else "text"
+            logging.info(f"Chunk {i+1} ({chunk_type}): similarity={chunk['similarity']:.3f}, source={chunk['source']}")
         
         return top_chunks
         
@@ -459,68 +472,121 @@ async def queryKnowledgeBase(query: QueryRequest):
                 "confidence": "low"
             }
         
-        # 2. Build context from chunk content
+        # 2. Build context from chunk content. seperating images and text
         context_parts = []
+        image_sources = []
         sources = []
         
         for i, result in enumerate(results, 1):
             content = result["content"]
             source = result.get("source") or result.get("page_name") or result.get("file_name", "Unknown")
             similarity = result.get("similarity", 0.0)
-
-            #get image if available
-            image_url = result.get("image_url")
+            image_url = result.get("image_url", None)
             
-            context_parts.append(f"[Source {i}: {source}]\n{content}")
-            source_data = {
-                "name": source,
-                "similarity": round(float(result.get("similarity")) if isinstance(similarity, (int, float, np.floating)) else 0.0, 3),
-                "rank": i,
-            }
             if image_url:
-                source_data["image_url"] = image_url
-            sources.append(source_data)
-        
-        context = "\n\n".join(context_parts)
+                image_sources.append({
+                    "url": image_url,
+                    "description": content,
+                    "source": source,
+                    "similarity": round(float(similarity) if isinstance(similarity, (int, float, np.floating)) else 0.0, 3),
+                    "rank": i
+                })
+            else:
+                # Add text content to context
+                context_parts.append(f"[Source {i}: {source}]\n{content}")
+                sources.append({
+                    "name": source,
+                    "similarity": round(float(result.get("similarity")) if isinstance(similarity, (int, float, np.floating)) else 0.0, 3),
+                    "rank": i,
+                    "type": "text"
+                })
         
         # 3. Enhanced system prompt for better responses
-        system_prompt = """You are Juno, a Digital Intelligence assistant for Junk Kouture.
+        messages =  [
+            {
+                "role": "system", 
+                "content": """You are Juno, a Digital Intelligence assistant for Junk Kouture.
 
 IMPORTANT INSTRUCTIONS:
 - Use ONLY the provided context to answer questions
+- When you see images, analyze them directly and describe what you observe
+- For creative tasks like "create a poster using this image", describe in detail what you see in the reference images and how you would adapt those visual elements
 - If the answer is not in the context, say: "I couldn't find that information in the embedded knowledge base."
 - When referencing information, mention the source (e.g., "According to [Source 1]...")
 - Be specific and detailed when the context supports it
 - If multiple sources have conflicting information, mention both perspectives
 - Do NOT make assumptions or add information not in the context
 
+When analyzing images, focus on:
+- Visual elements (colors, typography, layout, design style)
+- Branding elements (logos, text, styling)
+- Composition and artistic choices
+- Any text or messaging visible in the image
+
 Context quality: Based on the similarity scores, prioritize information from higher-ranked sources."""
+            }
+        ]
+
+        # Add context and user question to the messages
+        if context_parts:
+            text_context = "\n\n".join(context_parts)
+            user_content = [{"type": "text", "text": f"Text Context:\n{text_context}\n\nQuestion: {user_question}"}]
+        else:
+            user_content = [{"type": "text", "text": f"Question: {user_question}"}]
+        
+        # Add images to the message
+        for img_source in image_sources:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": img_source["url"],
+                    "detail": "high"  # high detail for better analysis
+                }
+            })
+            # Add context about the image
+            user_content.append({
+                "type": "text", 
+                "text": f"[Image from {img_source['source']}]: {img_source['description']}"
+            })
+        
+        messages.append({"role": "user", "content": user_content})
 
         # Make API call with client syntax
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
         
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {user_question}"}
-            ],
+            messages=messages,
             temperature=0.1,  # Lower temperature for more consistent responses
-            max_tokens=1000
+            max_tokens=1500
         )
         
         answer = response.choices[0].message.content
         
+        #combine sources and images
+        all_sources = sources + [
+            {
+                "name": img["source"],
+                similarity: img["similarity"],
+                "rank": img["rank"],
+                "type": "image",
+                "image_url": img["url"],
+            } for img in image_sources
+        ]
         # Determine confidence based on similarity scores
-        avg_similarity = sum((r.get("similarity", 0)) for r in results) / len(results)
-        confidence = "high" if avg_similarity > 0.7 else "medium" if avg_similarity > 0.5 else "low"
+        if results:
+            avg_similarity = sum((r.get("similarity", 0)) for r in results) / len(results)
+            confidence = "high" if avg_similarity > 0.7 else "medium" if avg_similarity > 0.5 else "low"
+        else:
+            confidence = "low"
         
         return {
             "answer": answer,
-            "sources": sources,
+            "sources": all_sources,
             "confidence": confidence,
             "context_used": len(results),
-            "debug_info": f"avg similarity={avg_similarity:.3f}"
+            "images_analyzed": len(image_sources),
+            "debug_info": f"avg similarity={avg_similarity:.3f}, images={len(image_sources)}, text={len(sources)}"
         }
         
     except Exception as e:
@@ -548,4 +614,190 @@ async def get_upload_link(
         "message": "This will open a secure upload form where you can select your file and choose the destination page."
     }
 
+#Image operation endpoints
+@app.get("/search-images")
+async def search_images(
+    query: str = Query(..., description="Search query for images"),
+    limit: int = Query(5, description="Number of images to return")
+):
+    """Search for images in the knowledge base and return them with analysis"""
+    try:
+        # Get images from database
+        image_results = supabase.table("juno_embeddings").select(
+            "page_name, chunk, image_url, original_filename, description"
+        ).eq("file_type", "image").limit(limit).execute()
+        
+        if not image_results.data:
+            return {"images": [], "message": "No images found in knowledge base"}
+        
+        # Filter images that match query (searches in both description and chunk)
+        matching_images = []
+        for img in image_results.data:
+            description = img.get("description", "")
+            chunk_text = img.get("chunk", "")
+            page_name = img.get("page_name", "")
+            
+            if (query.lower() in chunk_text.lower() or 
+                query.lower() in description.lower() or 
+                query.lower() in page_name.lower()):
+                matching_images.append({
+                    "source": page_name,
+                    "url": img["image_url"],
+                    "filename": img["original_filename"],
+                    "description": description,  # Use the dedicated description column
+                    "searchable_text": chunk_text  # Keep the chunk for search context
+                })
+        
+        return {
+            "images": matching_images[:limit],
+            "total_found": len(matching_images),
+            "query": query
+        }
+        
+    except Exception as e:
+        logging.error(f"Error searching images: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/analyze-images")
+async def analyze_images_with_prompt(request: dict):
+    """Analyze specific images with a custom prompt using GPT-4 Vision"""
+    try:
+        image_urls = request.get("image_urls", [])
+        prompt = request.get("prompt", "Analyze these images in detail")
+        
+        if not image_urls:
+            raise HTTPException(status_code=400, detail="No image URLs provided")
+        
+        # Build messages for vision API
+        messages = [
+            {
+                "role": "system",
+                "content": "You are Juno, analyzing images from the Junk Kouture knowledge base. Provide detailed, accurate descriptions of what you see."
+            }
+        ]
+        
+        # Add user prompt and images
+        user_content = [{"type": "text", "text": prompt}]
+        
+        for url in image_urls:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": url,
+                    "detail": "high"
+                }
+            })
+        
+        messages.append({"role": "user", "content": user_content})
+        
+        # Call vision API
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.1,
+            max_tokens=1500
+        )
+        
+        analysis = response.choices[0].message.content
+        
+        return {
+            "analysis": analysis,
+            "images_analyzed": len(image_urls),
+            "prompt_used": prompt
+        }
+        
+    except Exception as e:
+        logging.error(f"Error analyzing images: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CreativeRequest(BaseModel):
+    task: str  # e.g., "create a poster design"
+    reference_images: List[str] = []  # URLs of reference images
+    additional_context: str = ""  # Any additional text context
+
+@app.post("/creative-with-images")
+async def creative_task_with_images(request: CreativeRequest):
+    """Use images from knowledge base for creative tasks like poster design"""
+    try:
+        if not request.reference_images:
+            # Auto-search for relevant images based on task
+            search_terms = ["poster", "design", "logo", "branding", "creative", "graphic", "visual"]
+            found_images = []
+            
+            for term in search_terms:
+                image_results = supabase.table("juno_embeddings").select(
+                    "image_url, page_name, description"
+                ).eq("file_type", "image").ilike("chunk", f"%{term}%").limit(2).execute()
+                
+                for img in image_results.data:
+                    if img["image_url"] not in [x["url"] for x in found_images]:
+                        found_images.append({
+                            "url": img["image_url"],
+                            "source": img["page_name"],
+                            "description": img.get("description", "")
+                        })
+            
+            reference_images = [img["url"] for img in found_images[:3]]
+        else:
+            reference_images = request.reference_images
+        
+        if not reference_images:
+            return {
+                "error": "No reference images found in knowledge base",
+                "suggestion": "Try uploading some design references first"
+            }
+        
+        # Build creative prompt
+        creative_prompt = f"""
+Task: {request.task}
+
+Additional Context: {request.additional_context}
+
+Please analyze the reference images I'm showing you and create a detailed design concept based on what you see. Include:
+
+1. Visual Analysis: What design elements, colors, typography, and styling do you observe?
+2. Brand Elements: What Junk Kouture branding elements should be incorporated?
+3. Creative Concept: How would you adapt these visual elements for the requested task?
+4. Specific Recommendations: Colors, fonts, layout, imagery, and messaging suggestions
+5. Technical Details: Dimensions, file formats, or other specifications if relevant
+
+Be specific about what you see in each reference image and how it influences your creative recommendations.
+"""
+        
+        # Analyze with Vision API
+        messages = [
+            {"role": "system", "content": "You are Juno, a creative assistant for Junk Kouture. Use the reference images to create detailed, actionable design recommendations."},
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "text", "text": creative_prompt}
+                ] + [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": url, "detail": "high"}
+                    } for url in reference_images
+                ]
+            }
+        ]
+        
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.3,  # Slightly higher for creativity
+            max_tokens=2000
+        )
+        
+        return {
+            "creative_concept": response.choices[0].message.content,
+            "reference_images_used": reference_images,
+            "task": request.task,
+            "images_analyzed": len(reference_images)
+        }
+        
+    except Exception as e:
+        logging.error(f"Error in creative task: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
