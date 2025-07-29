@@ -51,6 +51,12 @@ paths:
                         rank:
                           type: integer
                           description: Source ranking
+                        image_url:
+                          type: string
+                          description: URL of the image associated with the source, if available
+                        description:
+                          type: string
+                          description: Brief description of the image
                   confidence:
                     type: string
                     description: Confidence level of the answer
@@ -242,7 +248,135 @@ paths:
                 properties:
                   detail:
                     type: string
-                    
+    /search-images:
+    get:
+      operationId: searchImages
+      summary: Search images in the knowledge base
+      description: Returns images that match a search query based on caption or context
+      parameters:
+        - name: query
+          in: query
+          required: true
+          description: Search query for images
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Number of images to return
+          schema:
+            type: integer
+            default: 5
+      responses:
+        '200':
+          description: Matching images found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  images:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        source:
+                          type: string
+                        url:
+                          type: string
+                        filename:
+                          type: string
+                        description:
+                          type: string
+                        searchable_text:
+                          type: string
+                  total_found:
+                    type: integer
+                  query:
+                    type: string
+        '500':
+          description: Internal server error
+    /analyze-images:
+    post:
+      operationId: analyzeImages
+      summary: Analyze images with a prompt using GPT-4 Vision
+      description: Accepts a list of image URLs and a custom prompt for analysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                image_urls:
+                  type: array
+                  items:
+                    type: string
+                  description: List of image URLs to analyze
+                prompt:
+                  type: string
+                  description: Prompt for GPT-4 Vision to analyze the images
+      responses:
+        '200':
+          description: Image analysis results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  analysis:
+                    type: string
+                  images_analyzed:
+                    type: integer
+                  prompt_used:
+                    type: string
+        '400':
+          description: Bad request
+        '500':
+          description: Internal server error
+    /creative-with-images:
+    post:
+      operationId: generateCreativeConcept
+      summary: Generate creative design ideas using reference images
+      description: Uses reference images from the knowledge base to suggest creative design directions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                task:
+                  type: string
+                  description: Description of the creative task (e.g. "create a campaign poster")
+                reference_images:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional list of image URLs to use as inspiration
+                additional_context:
+                  type: string
+                  description: Extra context to guide the creative output
+      responses:
+        '200':
+          description: Creative concept generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  creative_concept:
+                    type: string
+                  reference_images_used:
+                    type: array
+                    items:
+                      type: string
+                  task:
+                    type: string
+                  images_analyzed:
+                    type: integer
+        '500':
+          description: Internal server error
 components:
   schemas: {}
 security: []

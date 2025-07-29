@@ -484,19 +484,28 @@ async def queryKnowledgeBase(query: QueryRequest):
             image_url = result.get("image_url", None)
             
             if image_url:
+                try:
+                    sim_val = float(sim_val)
+                except (ValueError, TypeError):
+                    sim_val = 0.0
                 image_sources.append({
                     "url": image_url,
                     "description": content,
                     "source": source,
-                    "similarity": round(float(similarity) if isinstance(similarity, (int, float, np.floating)) else 0.0, 3),
+                    "similarity": round(sim_val, 3),
                     "rank": i
                 })
             else:
                 # Add text content to context
                 context_parts.append(f"[Source {i}: {source}]\n{content}")
+                sim_val = result.get("similarity", 0.0)
+                try:
+                    sim_val = float(sim_val)
+                except (ValueError, TypeError):
+                    sim_val = 0.0
                 sources.append({
                     "name": source,
-                    "similarity": round(float(result.get("similarity")) if isinstance(similarity, (int, float, np.floating)) else 0.0, 3),
+                    "similarity": round(sim_val, 3),
                     "rank": i,
                     "type": "text"
                 })
@@ -615,6 +624,11 @@ async def get_upload_link(
     }
 
 #Image operation endpoints
+class CreativeRequest(BaseModel):
+    task: str  # e.g., "create a poster design"
+    reference_images: List[str] = []  # URLs of reference images
+    additional_context: str = ""  # Any additional text context
+
 @app.get("/search-images")
 async def search_images(
     query: str = Query(..., description="Search query for images"),
@@ -712,12 +726,6 @@ async def analyze_images_with_prompt(request: dict):
         logging.error(f"Error analyzing images: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-class CreativeRequest(BaseModel):
-    task: str  # e.g., "create a poster design"
-    reference_images: List[str] = []  # URLs of reference images
-    additional_context: str = ""  # Any additional text context
-
 @app.post("/creative-with-images")
 async def creative_task_with_images(request: CreativeRequest):
     """Use images from knowledge base for creative tasks like poster design"""
@@ -788,7 +796,7 @@ Be specific about what you see in each reference image and how it influences you
             model="gpt-4o",
             messages=messages,
             temperature=0.3,  # Slightly higher for creativity
-            max_tokens=2000
+            max_tokens=1500
         )
         
         return {
