@@ -248,7 +248,7 @@ paths:
                 properties:
                   detail:
                     type: string
-    /search-images:
+  /search-images:
     get:
       operationId: searchImages
       summary: Search images in the knowledge base
@@ -296,7 +296,7 @@ paths:
                     type: string
         '500':
           description: Internal server error
-    /analyze-images:
+  /analyze-images:
     post:
       operationId: analyzeImages
       summary: Analyze images with a prompt using GPT-4 Vision
@@ -334,7 +334,7 @@ paths:
           description: Bad request
         '500':
           description: Internal server error
-    /creative-with-images:
+  /creative-with-images:
     post:
       operationId: generateCreativeConcept
       summary: Generate creative design ideas using reference images

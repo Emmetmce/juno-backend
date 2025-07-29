@@ -287,7 +287,7 @@ class QueryRequest(BaseModel):
 def calc_cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-async def get_relevant_chunks(query: str, k: int = 5, include_images: bool = True):
+async def get_relevant_chunks(query: str, k: int = 5):
     """
     Get top k matching chunks from Supabase using vector similarity
     """
@@ -300,15 +300,10 @@ async def get_relevant_chunks(query: str, k: int = 5, include_images: bool = Tru
         query_embedding = np.array(embedding_response.data[0].embedding, dtype=np.float32)
         
         # Query Supabase for both text and image results
-        if include_images:
-            response = supabase.table("juno_embeddings").select(
-                "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash, file_type, image_url, description, original_filename"
-            ).execute()
-        else:
-            # If images are not needed, query only text chunks
-            response = supabase.table("juno_embeddings").select(
-                "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash, file_type, description"
-            ).execute()
+        response = supabase.table("juno_embeddings").select(
+            "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash, file_type, image_url, description, original_filename"
+        ).execute()
+
         if not response.data:
             logging.info("No chunks found in the database")
             return []
@@ -345,11 +340,14 @@ async def get_relevant_chunks(query: str, k: int = 5, include_images: bool = Tru
         logging.info(f"Valid chunks with similarity: {len(valid_chunks)}")
         
         # Sort by similarity and return top k
-        top_chunks = sorted(valid_chunks, key=lambda x: x["similarity"], reverse=True)[:k]
+        top_chunks = sorted(valid_chunks, key=lambda x: x["similarity"], reverse=True)[:max(k, 20)]
         # Log similarity scores for debugging
         for i, chunk in enumerate(top_chunks):
             chunk_type = "image" if chunk.get("is_image") else "text"
             logging.info(f"Chunk {i+1} ({chunk_type}): similarity={chunk['similarity']:.3f}, source={chunk['source']}")
+            # log if image
+            if chunk_type == "image":
+                logging.info(f"🖼️ Image URL: {chunk.get('image_url')}, description: {chunk.get('description', '')}")
         
         return top_chunks
         
@@ -463,7 +461,13 @@ async def queryKnowledgeBase(query: QueryRequest):
         user_question = query.query
 
         #get relevant chunks from supabase
-        results = await get_relevant_chunks(user_question, k=5)
+        results = await get_relevant_chunks(user_question, k=20)
+        #seperate text and image results
+        text_chunks = [r for r in results if not r.get("is_image")]
+        image_chunks = [r for r in results if r.get("is_image")]
+
+        # Use top 5 text and top 3 image chunks
+        final_results = text_chunks[:5] + image_chunks[:3]
         
         if not results:
             return {
@@ -477,7 +481,7 @@ async def queryKnowledgeBase(query: QueryRequest):
         image_sources = []
         sources = []
         
-        for i, result in enumerate(results, 1):
+        for i, result in enumerate(final_results, 1):
             content = result["content"]
             source = result.get("source") or result.get("page_name") or result.get("file_name", "Unknown")
             similarity = result.get("similarity", 0.0)
@@ -485,7 +489,7 @@ async def queryKnowledgeBase(query: QueryRequest):
             
             if image_url:
                 try:
-                    sim_val = float(sim_val)
+                    sim_val = float(similarity)
                 except (ValueError, TypeError):
                     sim_val = 0.0
                 image_sources.append({
@@ -500,7 +504,7 @@ async def queryKnowledgeBase(query: QueryRequest):
                 context_parts.append(f"[Source {i}: {source}]\n{content}")
                 sim_val = result.get("similarity", 0.0)
                 try:
-                    sim_val = float(sim_val)
+                    sim_val = float(similarity)
                 except (ValueError, TypeError):
                     sim_val = 0.0
                 sources.append({
@@ -576,7 +580,7 @@ Context quality: Based on the similarity scores, prioritize information from hig
         all_sources = sources + [
             {
                 "name": img["source"],
-                similarity: img["similarity"],
+                "similarity": img["similarity"],
                 "rank": img["rank"],
                 "type": "image",
                 "image_url": img["url"],
