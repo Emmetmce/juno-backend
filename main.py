@@ -11,6 +11,10 @@ import json
 from typing import List, Literal
 from upload_ui import router as upload_ui_router
 from fastapi.staticfiles import StaticFiles
+import requests
+import tempfile
+import hashlib
+
 
 
 
@@ -524,6 +528,7 @@ IMPORTANT INSTRUCTIONS:
 - Use ONLY the provided context to answer questions
 - When you see images, analyze them directly and describe what you observe
 - For creative tasks like "create a poster using this image", describe in detail what you see in the reference images and how you would adapt those visual elements
+- For image editing requests like "add an exclamation point to the JK dublin graphic", you can use the /edit-image endpoint to modify existing images with AI
 - If the answer is not in the context, say: "I couldn't find that information in the embedded knowledge base."
 - When referencing information, mention the source (e.g., "According to [Source 1]...")
 - Be specific and detailed when the context supports it
@@ -535,6 +540,23 @@ When analyzing images, focus on:
 - Branding elements (logos, text, styling)
 - Composition and artistic choices
 - Any text or messaging visible in the image
+
+IMAGE EDITING CAPABILITIES:
+You can edit existing images using the /edit-image endpoint. When users ask to modify images:
+
+1. First identify the image they want to edit using descriptive terms
+2. Use the edit_instruction to describe the modification in natural language
+3. The system will find the best matching image and apply the edit using AI
+
+Example: "add an exclamation point to the top right corner of the JK dublin graphic"
+- search_query: "Junk Kouture dublin graphic" 
+- edit_instruction: "add an exclamation point to the top right corner"
+
+Available through your existing search and creative endpoints:
+- Search images: Use context from vector search results  
+- Analyze images: Use vision API analysis in responses
+- Create with images: Use images as creative references
+
 
 Context quality: Based on the similarity scores, prioritize information from higher-ranked sources."""
             }
@@ -627,11 +649,18 @@ async def get_upload_link(
         "message": "This will open a secure upload form where you can select your file and choose the destination page."
     }
 
+
+
 #Image operation endpoints
 class CreativeRequest(BaseModel):
     task: str  # e.g., "create a poster design"
     reference_images: List[str] = []  # URLs of reference images
     additional_context: str = ""  # Any additional text context
+
+class ImageEditRequest(BaseModel):
+    search_query: str  
+    edit_instruction: str  
+    save_to_notion_page: str = None  # Optional
 
 @app.get("/search-images")
 async def search_images(
@@ -675,7 +704,6 @@ async def search_images(
     except Exception as e:
         logging.error(f"Error searching images: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/analyze-images")
 async def analyze_images_with_prompt(request: dict):
@@ -813,3 +841,199 @@ Be specific about what you see in each reference image and how it influences you
     except Exception as e:
         logging.error(f"Error in creative task: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/edit-image")
+async def edit_image_with_ai(request: ImageEditRequest):
+    """Find an image and edit it using OpenAI's image editing capabilities"""
+    try:
+        # Step 1: Use your existing search logic (similar to /search-images)
+        image_results = supabase.table("juno_embeddings").select(
+            "page_name, image_url, original_filename, description, chunk"
+        ).eq("file_type", "image").limit(10).execute()
+        
+        if not image_results.data:
+            return {"error": "No images found in knowledge base"}
+        
+        # Filter images that match the search query (reuse your search logic)
+        matching_images = []
+        query_lower = request.search_query.lower()
+        
+        for img in image_results.data:
+            description = img.get("description", "").lower()
+            chunk_text = img.get("chunk", "").lower()
+            filename = img.get("original_filename", "").lower()
+            page_name = img.get("page_name", "").lower()
+            
+            # Calculate relevance score
+            score = 0
+            if query_lower in filename:
+                score += 3
+            if query_lower in description:
+                score += 2
+            if query_lower in page_name:
+                score += 1
+            if query_lower in chunk_text:
+                score += 1
+            
+            # Check for partial word matches
+            query_words = query_lower.split()
+            for word in query_words:
+                if word in filename:
+                    score += 1
+                if word in description:
+                    score += 0.5
+            
+            if score > 0:
+                matching_images.append({
+                    **img,
+                    "relevance_score": score
+                })
+        
+        if not matching_images:
+            return {
+                "error": f"No images found matching '{request.search_query}'",
+                "suggestion": "Try searching with different terms",
+                "available_images": [img["original_filename"] for img in image_results.data[:5]]
+            }
+        
+        # Sort by relevance and use the best match
+        matching_images.sort(key=lambda x: x["relevance_score"], reverse=True)
+        source_image = matching_images[0]
+        image_url = source_image["image_url"]
+        
+        # Step 2: Download the image
+        response = requests.get(image_url)
+        if response.status_code != 200:
+            return {"error": f"Failed to download image from {image_url}"}
+        
+        # Step 3: Create temporary file for the image
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+            temp_file.write(response.content)
+            temp_image_path = temp_file.name
+        
+        try:
+            # Step 4: Use OpenAI's image editing API
+            client = openai.OpenAI(api_key=OPENAI_API_KEY)
+            
+            with open(temp_image_path, "rb") as image_file:
+                edit_response = client.images.edit(
+                    image=image_file,
+                    prompt=request.edit_instruction,
+                    n=1,
+                    size="1024x1024"
+                )
+            
+            edited_image_url = edit_response.data[0].url
+            
+            # Step 5: Download the edited image
+            edited_response = requests.get(edited_image_url)
+            if edited_response.status_code != 200:
+                return {"error": "Failed to download edited image from OpenAI"}
+            
+            # Step 6: Store the edited image in Supabase
+            import time
+            timestamp = int(time.time())
+            # Create a descriptive filename
+            safe_instruction = re.sub(r'[^a-zA-Z0-9_.-]', '_', request.edit_instruction.replace(' ', '_'))[:50]
+            edited_filename = f"edited_{safe_instruction}_{timestamp}_{source_image['original_filename']}"
+            
+            # Upload to Supabase storage (using your existing pattern)
+            supabase.storage.from_("juno_images").upload(
+                path=edited_filename,
+                file=edited_response.content,
+                file_options={"content-type": "image/png", "x-upsert": "true"}
+            )
+            
+            # Get public URL for the edited image
+            edited_public_url = f"{SUPABASE_URL}/storage/v1/object/public/juno_images/{edited_filename}"
+            
+            # Step 7: Generate description and embed the edited image
+            description = f"Edited version of {source_image['original_filename']}: {request.edit_instruction}"
+            
+            # Create embedding for the description
+            embedding_response = openai.embeddings.create(
+                input=description,
+                model="text-embedding-ada-002"
+            )
+            
+            # Step 8: Store metadata in database (following your existing pattern)
+            file_hash = hashlib.md5(edited_response.content).hexdigest()
+            chunk_hash = hashlib.md5(description.encode('utf-8')).hexdigest()
+            
+            supabase.table("juno_embeddings").insert({
+                "page_name": "Edited Images",
+                "chunk": f"Edited image: {description}",
+                "embedding": json.dumps(embedding_response.data[0].embedding),
+                "source_file": f"edited_{edited_filename}",
+                "chunk_index": 0,
+                "file_hash": file_hash,
+                "chunk_hash": chunk_hash,
+                "file_type": "image",
+                "image_url": edited_public_url,
+                "original_filename": edited_filename,
+                "description": description
+            }).execute()
+            
+            # Step 9: Optionally save to Notion page (reuse your existing function)
+            #notion_saved = False
+            #if request.save_to_notion_page:
+                #try:
+                #     add_file_to_notion_page(
+                #         request.save_to_notion_page, 
+                #         edited_filename, 
+                #         edited_public_url
+                #     )
+                #     notion_saved = True
+                #     logging.info(f"Saved edited image to Notion page: {request.save_to_notion_page}")
+                # except Exception as e:
+                #     logging.warning(f"Failed to save to Notion: {e}")
+            
+            return {
+                "status": "success",
+                "original_image": {
+                    "filename": source_image["original_filename"],
+                    "url": image_url,
+                    "description": source_image.get("description", ""),
+                    "source_page": source_image.get("page_name"),
+                    "relevance_score": source_image["relevance_score"]
+                },
+                "edited_image": {
+                    "filename": edited_filename,
+                    "url": edited_public_url,
+                    "description": description
+                },
+                "edit_instruction": request.edit_instruction,
+                "saved_to_notion": notion_saved,
+                "notion_page": request.save_to_notion_page if notion_saved else None
+            }
+            
+        finally:
+            # Clean up temporary file
+            os.unlink(temp_image_path)
+            
+    except Exception as e:
+        logging.error(f"Error editing image: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Update your existing queryKnowledgeBase system prompt to include image editing context
+# Add this to your system prompt in the queryKnowledgeBase function:
+
+#def get_image_editing_system_context():
+    """Add this content to your system prompt in queryKnowledgeBase"""
+    return """
+IMAGE EDITING CAPABILITIES:
+You can edit existing images using the /edit-image endpoint. When users ask to modify images:
+
+1. First identify the image they want to edit using descriptive terms
+2. Use the edit_instruction to describe the modification in natural language
+3. The system will find the best matching image and apply the edit using AI
+
+Example: "add an exclamation point to the top right corner of the JK dublin graphic"
+- search_query: "JK dublin graphic" 
+- edit_instruction: "add a red exclamation point to the top right corner"
+
+Available through your existing search and creative endpoints:
+- Search images: Use context from vector search results  
+- Analyze images: Use vision API analysis in responses
+- Create with images: Use images as creative references
+"""

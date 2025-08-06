@@ -377,6 +377,79 @@ paths:
                     type: integer
         '500':
           description: Internal server error
+  /edit-image:
+    post:
+      operationId: editImageWithAI
+      summary: Edit an image stored in Supabase using OpenAI's image editing API
+      description: Searches for a relevant image in the knowledge base, applies the requested edit using GPT-4 Vision API, and saves the result to Supabase and optionally Notion.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                search_query:
+                  type: string
+                  description: Keyword(s) to find the source image (filename, description, or page name)
+                  example: "dublin poster"
+                edit_instruction:
+                  type: string
+                  description: Natural language instruction for the edit
+                  example: "add an exclamation mark to the top right"
+                save_to_notion_page:
+                  type: string
+                  description: (Optional) Notion page name to attach the edited image to
+              required:
+                - search_query
+                - edit_instruction
+      responses:
+        '200':
+          description: Edited image created and stored successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  original_image:
+                    type: object
+                    properties:
+                      filename:
+                        type: string
+                      url:
+                        type: string
+                      description:
+                        type: string
+                      source_page:
+                        type: string
+                      relevance_score:
+                        type: number
+                  edited_image:
+                    type: object
+                    properties:
+                      filename:
+                        type: string
+                      url:
+                        type: string
+                      description:
+                        type: string
+                  edit_instruction:
+                    type: string
+                  saved_to_notion:
+                    type: boolean
+                  notion_page:
+                    type: string
+        '500':
+          description: Failed to edit image
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
 components:
   schemas: {}
 security: []
