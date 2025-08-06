@@ -14,8 +14,8 @@ from fastapi.staticfiles import StaticFiles
 import requests
 import tempfile
 import hashlib
-
-
+import re
+import time
 
 
 #logging for debugging
@@ -662,6 +662,88 @@ class ImageEditRequest(BaseModel):
     edit_instruction: str  
     save_to_notion_page: str = None  # Optional
 
+async def get_matching_images(search_query: str, k: int = 10):
+    """
+    Search for images using vector embeddings on the description field
+    Optimized for Supabase structure where images have descriptions
+    """
+    try:
+        # Get embedding for the search query
+        embedding_response = openai.embeddings.create(
+            model="text-embedding-ada-002",
+            input=search_query
+        )
+        query_embedding = np.array(embedding_response.data[0].embedding, dtype=np.float32)
+        
+        # Query Supabase for image results only
+        response = supabase.table("juno_embeddings").select(
+            "id, page_name, chunk, embedding, description, image_url, original_filename, file_type"
+        ).eq("file_type", "image").is_("image_url", "not.null").execute()
+
+        if not response.data:
+            logging.info("No images found in the database")
+            return []
+        
+        images = response.data
+        
+        # Compute similarity for each image based on its description
+        for image in images:
+            try:
+                # Convert embedding to numpy array
+                image_embedding = image["embedding"]
+                if isinstance(image_embedding, str):
+                    image_embedding = np.array(json.loads(image_embedding), dtype=np.float32)
+                else:
+                    image_embedding = np.array(image_embedding, dtype=np.float32)
+                
+                if len(image_embedding) != len(query_embedding):
+                    logging.warning(f"Image embedding length mismatch: {len(image_embedding)} vs {len(query_embedding)}")
+                    continue
+                    
+                image["similarity"] = calc_cosine_similarity(query_embedding, image_embedding)
+                
+                # Also do text matching on description for boost
+                description = image.get("description", "").lower()
+                filename = image.get("original_filename", "").lower()
+                search_lower = search_query.lower()
+                
+                # Boost similarity if there are direct text matches
+                text_boost = 0
+                if search_lower in description:
+                    text_boost += 0.1
+                if search_lower in filename:
+                    text_boost += 0.05
+                    
+                # Check for individual words
+                search_words = search_lower.split()
+                for word in search_words:
+                    if word in description:
+                        text_boost += 0.02
+                
+                image["similarity"] = min(1.0, image["similarity"] + text_boost)
+                
+            except Exception as e:
+                logging.error(f"Error processing image {image['id']}: {e}")
+                continue
+        
+        # Filter out images with no similarity score and sort
+        valid_images = [img for img in images if "similarity" in img]
+        logging.info(f"Valid images with similarity: {len(valid_images)}")
+        
+        # Sort by similarity and return top k
+        top_images = sorted(valid_images, key=lambda x: x["similarity"], reverse=True)[:k]
+        
+        # Log similarity scores for debugging
+        for i, img in enumerate(top_images[:5]):  # Log top 5
+            logging.info(f"Image {i+1}: {img['original_filename']} - similarity={img['similarity']:.3f}")
+            logging.info(f"  Description: {img.get('description', '')[:100]}...")
+        
+        return top_images
+        
+    except Exception as e:
+        logging.error("❌ Error getting matching images:", exc_info=True)
+        return []
+
 @app.get("/search-images")
 async def search_images(
     query: str = Query(..., description="Search query for images"),
@@ -846,60 +928,35 @@ Be specific about what you see in each reference image and how it influences you
 async def edit_image_with_ai(request: ImageEditRequest):
     """Find an image and edit it using OpenAI's image editing capabilities"""
     try:
-        # Step 1: Use your existing search logic (similar to /search-images)
-        image_results = supabase.table("juno_embeddings").select(
-            "page_name, image_url, original_filename, description, chunk"
-        ).eq("file_type", "image").limit(10).execute()
-        
-        if not image_results.data:
-            return {"error": "No images found in knowledge base"}
-        
-        # Filter images that match the search query (reuse your search logic)
-        matching_images = []
-        query_lower = request.search_query.lower()
-        
-        for img in image_results.data:
-            description = img.get("description", "").lower()
-            chunk_text = img.get("chunk", "").lower()
-            filename = img.get("original_filename", "").lower()
-            page_name = img.get("page_name", "").lower()
-            
-            # Calculate relevance score
-            score = 0
-            if query_lower in filename:
-                score += 3
-            if query_lower in description:
-                score += 2
-            if query_lower in page_name:
-                score += 1
-            if query_lower in chunk_text:
-                score += 1
-            
-            # Check for partial word matches
-            query_words = query_lower.split()
-            for word in query_words:
-                if word in filename:
-                    score += 1
-                if word in description:
-                    score += 0.5
-            
-            if score > 0:
-                matching_images.append({
-                    **img,
-                    "relevance_score": score
-                })
+        # Step 1: Use specialized image search
+        matching_images = await get_matching_images(request.search_query, k=10)
         
         if not matching_images:
+            # Fallback: Get all images for user to see what's available
+            all_images = supabase.table("juno_embeddings").select(
+                "original_filename, description, page_name"
+            ).eq("file_type", "image").is_("image_url", "not.null").limit(10).execute()
+            
+            available_images = [
+                f"{img['original_filename']} ({img.get('description', '')[:50]}...)" 
+                for img in all_images.data
+            ]
+            
             return {
                 "error": f"No images found matching '{request.search_query}'",
-                "suggestion": "Try searching with different terms",
-                "available_images": [img["original_filename"] for img in image_results.data[:5]]
+                "suggestion": "Try these terms based on available images:",
+                "available_images": available_images
             }
         
-        # Sort by relevance and use the best match
-        matching_images.sort(key=lambda x: x["relevance_score"], reverse=True)
-        source_image = matching_images[0]
-        image_url = source_image["image_url"]
+        # Use the best match
+        best_match = matching_images[0]
+        image_url = best_match["image_url"]
+        
+        if not image_url:
+            return {"error": "Selected image has no URL"}
+        
+        logging.info(f"🎯 Selected image: {best_match['original_filename']} (similarity: {best_match['similarity']:.3f})")
+        logging.info(f"📝 Image description: {best_match.get('description', '')}")
         
         # Step 2: Download the image
         response = requests.get(image_url)
@@ -931,13 +988,11 @@ async def edit_image_with_ai(request: ImageEditRequest):
                 return {"error": "Failed to download edited image from OpenAI"}
             
             # Step 6: Store the edited image in Supabase
-            import time
             timestamp = int(time.time())
-            # Create a descriptive filename
             safe_instruction = re.sub(r'[^a-zA-Z0-9_.-]', '_', request.edit_instruction.replace(' ', '_'))[:50]
-            edited_filename = f"edited_{safe_instruction}_{timestamp}_{source_image['original_filename']}"
+            edited_filename = f"edited_{safe_instruction}_{timestamp}_{best_match['original_filename']}"
             
-            # Upload to Supabase storage (using your existing pattern)
+            # Upload to Supabase storage
             supabase.storage.from_("juno_images").upload(
                 path=edited_filename,
                 file=edited_response.content,
@@ -947,64 +1002,66 @@ async def edit_image_with_ai(request: ImageEditRequest):
             # Get public URL for the edited image
             edited_public_url = f"{SUPABASE_URL}/storage/v1/object/public/juno_images/{edited_filename}"
             
-            # Step 7: Generate description and embed the edited image
-            description = f"Edited version of {source_image['original_filename']}: {request.edit_instruction}"
+            # Step 7: Generate description for the edited image
+            original_desc = best_match.get('description', '')
+            edited_description = f"Edited version of '{best_match['original_filename']}'. Original: {original_desc}. Edit applied: {request.edit_instruction}"
             
-            # Create embedding for the description
+            # Create embedding for the edited image description
             embedding_response = openai.embeddings.create(
-                input=description,
+                input=edited_description,
                 model="text-embedding-ada-002"
             )
             
-            # Step 8: Store metadata in database (following your existing pattern)
+            # Step 8: Store metadata in database
             file_hash = hashlib.md5(edited_response.content).hexdigest()
-            chunk_hash = hashlib.md5(description.encode('utf-8')).hexdigest()
+            chunk_hash = hashlib.md5(edited_description.encode('utf-8')).hexdigest()
             
             supabase.table("juno_embeddings").insert({
-                "page_name": "Edited Images",
-                "chunk": f"Edited image: {description}",
+                "page_name": "AI Edited Images",
+                "chunk": f"AI edited image: {edited_description}",
                 "embedding": json.dumps(embedding_response.data[0].embedding),
-                "source_file": f"edited_{edited_filename}",
+                "source_file": f"ai_edited_{edited_filename}",
                 "chunk_index": 0,
                 "file_hash": file_hash,
                 "chunk_hash": chunk_hash,
                 "file_type": "image",
                 "image_url": edited_public_url,
                 "original_filename": edited_filename,
-                "description": description
+                "description": edited_description  # This is key for future searches!
             }).execute()
             
-            # Step 9: Optionally save to Notion page (reuse your existing function)
-            #notion_saved = False
-            #if request.save_to_notion_page:
-                #try:
-                #     add_file_to_notion_page(
-                #         request.save_to_notion_page, 
-                #         edited_filename, 
-                #         edited_public_url
-                #     )
-                #     notion_saved = True
-                #     logging.info(f"Saved edited image to Notion page: {request.save_to_notion_page}")
-                # except Exception as e:
-                #     logging.warning(f"Failed to save to Notion: {e}")
+            # Step 9: Optionally save to Notion page
+            notion_saved = False
+            if request.save_to_notion_page:
+                try:
+                    add_file_to_notion_page(
+                        request.save_to_notion_page, 
+                        edited_filename, 
+                        edited_public_url
+                    )
+                    notion_saved = True
+                    logging.info(f"✅ Saved edited image to Notion page: {request.save_to_notion_page}")
+                except Exception as e:
+                    logging.warning(f"⚠️ Failed to save to Notion: {e}")
             
             return {
                 "status": "success",
                 "original_image": {
-                    "filename": source_image["original_filename"],
+                    "filename": best_match["original_filename"],
                     "url": image_url,
-                    "description": source_image.get("description", ""),
-                    "source_page": source_image.get("page_name"),
-                    "relevance_score": source_image["relevance_score"]
+                    "description": best_match.get("description", ""),
+                    "source_page": best_match.get("page_name"),
+                    "similarity": round(best_match["similarity"], 3)
                 },
                 "edited_image": {
                     "filename": edited_filename,
                     "url": edited_public_url,
-                    "description": description
+                    "description": edited_description
                 },
                 "edit_instruction": request.edit_instruction,
                 "saved_to_notion": notion_saved,
-                "notion_page": request.save_to_notion_page if notion_saved else None
+                "notion_page": request.save_to_notion_page if notion_saved else None,
+                "debug_info": f"Found {len(matching_images)} matching images, selected best with similarity {best_match['similarity']:.3f}"
             }
             
         finally:
@@ -1012,7 +1069,7 @@ async def edit_image_with_ai(request: ImageEditRequest):
             os.unlink(temp_image_path)
             
     except Exception as e:
-        logging.error(f"Error editing image: {e}")
+        logging.error(f"❌ Error editing image: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Update your existing queryKnowledgeBase system prompt to include image editing context
