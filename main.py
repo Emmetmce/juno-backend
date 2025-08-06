@@ -784,7 +784,7 @@ async def search_images(
                 "url": img["image_url"],
                 "filename": img["original_filename"],
                 "description": img.get("description", ""),
-                "similarity": round(img.get("similarity", 0), 3),
+                "similarity": float(round(img.get("similarity", 0), 3)),
                 "searchable_text": img.get("chunk", "")  # Keep for compatibility
             })
         
@@ -1064,7 +1064,7 @@ async def edit_image_with_ai(request: ImageEditRequest):
                     "url": image_url,
                     "description": best_match.get("description", ""),
                     "source_page": best_match.get("page_name"),
-                    "similarity": round(best_match["similarity"], 3)
+                    "similarity": float(round(best_match["similarity"], 3))
                 },
                 "edited_image": {
                     "filename": edited_filename,
