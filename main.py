@@ -749,38 +749,51 @@ async def search_images(
     query: str = Query(..., description="Search query for images"),
     limit: int = Query(5, description="Number of images to return")
 ):
-    """Search for images in the knowledge base and return them with analysis"""
+    """Search for images in the knowledge base using vector embeddings"""
     try:
-        # Get images from database
-        image_results = supabase.table("juno_embeddings").select(
-            "page_name, chunk, image_url, original_filename, description"
-        ).eq("file_type", "image").limit(limit).execute()
+        # Use the better vector-based search function
+        matching_images = await get_matching_images(query, k=limit)
         
-        if not image_results.data:
-            return {"images": [], "message": "No images found in knowledge base"}
-        
-        # Filter images that match query (searches in both description and chunk)
-        matching_images = []
-        for img in image_results.data:
-            description = img.get("description", "")
-            chunk_text = img.get("chunk", "")
-            page_name = img.get("page_name", "")
+        if not matching_images:
+            # Fallback: show what images are available
+            all_images = supabase.table("juno_embeddings").select(
+                "page_name, image_url, original_filename, description"
+            ).eq("file_type", "image").is_("image_url", "not.null").limit(10).execute()
             
-            if (query.lower() in chunk_text.lower() or 
-                query.lower() in description.lower() or 
-                query.lower() in page_name.lower()):
-                matching_images.append({
-                    "source": page_name,
-                    "url": img["image_url"],
+            available_samples = []
+            for img in all_images.data[:5]:  # Show first 5 as samples
+                available_samples.append({
                     "filename": img["original_filename"],
-                    "description": description,  # Use the dedicated description column
-                    "searchable_text": chunk_text  # Keep the chunk for search context
+                    "description": img.get("description", "")[:100] + "..." if len(img.get("description", "")) > 100 else img.get("description", ""),
+                    "source": img["page_name"]
                 })
+            
+            return {
+                "images": [],
+                "message": f"No images found matching '{query}'",
+                "suggestions": "Try terms like: dublin, junk kouture, logo, promotional, graphic",
+                "available_samples": available_samples,
+                "total_images_in_db": len(all_images.data)
+            }
+        
+        # Format results for the response
+        formatted_images = []
+        for img in matching_images:
+            formatted_images.append({
+                "source": img.get("page_name", "Unknown"),
+                "url": img["image_url"],
+                "filename": img["original_filename"],
+                "description": img.get("description", ""),
+                "similarity": round(img.get("similarity", 0), 3),
+                "searchable_text": img.get("chunk", "")  # Keep for compatibility
+            })
         
         return {
-            "images": matching_images[:limit],
+            "images": formatted_images,
             "total_found": len(matching_images),
-            "query": query
+            "query": query,
+            "search_method": "vector_embeddings",
+            "debug": f"Found {len(matching_images)} images using vector search"
         }
         
     except Exception as e:
