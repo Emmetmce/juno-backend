@@ -678,7 +678,7 @@ async def get_matching_images(search_query: str, k: int = 10):
         # Query Supabase for image results only
         response = supabase.table("juno_embeddings").select(
             "id, page_name, chunk, embedding, description, image_url, original_filename, file_type"
-        ).eq("file_type", "image").is_("image_url", "not.null").execute()
+        ).eq("file_type", "image").neq("image_url", None).execute()
 
         if not response.data:
             logging.info("No images found in the database")
@@ -758,7 +758,7 @@ async def search_images(
             # Fallback: show what images are available
             all_images = supabase.table("juno_embeddings").select(
                 "page_name, image_url, original_filename, description"
-            ).eq("file_type", "image").is_("image_url", "not.null").limit(10).execute()
+            ).eq("file_type", "image").neq("image_url", None).limit(10).execute()
             
             available_samples = []
             for img in all_images.data[:5]:  # Show first 5 as samples
@@ -948,7 +948,7 @@ async def edit_image_with_ai(request: ImageEditRequest):
             # Fallback: Get all images for user to see what's available
             all_images = supabase.table("juno_embeddings").select(
                 "original_filename, description, page_name"
-            ).eq("file_type", "image").is_("image_url", "not.null").limit(10).execute()
+            ).eq("file_type", "image").neq("image_url", None).limit(10).execute()
             
             available_images = [
                 f"{img['original_filename']} ({img.get('description', '')[:50]}...)" 
