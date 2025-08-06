@@ -662,6 +662,30 @@ class ImageEditRequest(BaseModel):
     edit_instruction: str  
     save_to_notion_page: str = None  # Optional
 
+def download_image_via_supabase(image_url: str):
+    """Download image using Supabase client instead of requests"""
+    try:
+        # Extract the file path from the full URL
+        # URL format: https://your-project.supabase.co/storage/v1/object/public/bucket/path
+        url_parts = image_url.split('/storage/v1/object/public/')
+        if len(url_parts) != 2:
+            raise ValueError("Invalid Supabase storage URL format")
+        
+        bucket_and_path = url_parts[1]
+        bucket_name, file_path = bucket_and_path.split('/', 1)
+        
+        # Use Supabase storage client to download
+        response = supabase.storage.from_(bucket_name).download(file_path)
+        
+        if not response:
+            raise ValueError("Failed to download from Supabase storage")
+        
+        return response  # This should be bytes
+        
+    except Exception as e:
+        logging.error(f"Supabase download failed: {e}")
+        raise
+
 async def get_matching_images(search_query: str, k: int = 10):
     """
     Search for images using vector embeddings on the description field
@@ -939,7 +963,7 @@ Be specific about what you see in each reference image and how it influences you
 
 @app.post("/edit-image")
 async def edit_image_with_ai(request: ImageEditRequest):
-    """Find an image and edit it using OpenAI's image editing capabilities"""
+    """Find an image and edit it using OpenAI's image editing capabilities, using supabase download"""
     try:
         # Step 1: Use specialized image search
         matching_images = await get_matching_images(request.search_query, k=10)
@@ -961,24 +985,25 @@ async def edit_image_with_ai(request: ImageEditRequest):
                 "available_images": available_images
             }
         
-        # Use the best match
         best_match = matching_images[0]
         image_url = best_match["image_url"]
         
-        if not image_url:
-            return {"error": "Selected image has no URL"}
+        logging.info(f"🎯 Downloading via Supabase: {image_url}")
         
-        logging.info(f"🎯 Selected image: {best_match['original_filename']} (similarity: {best_match['similarity']:.3f})")
-        logging.info(f"📝 Image description: {best_match.get('description', '')}")
-        
-        # Step 2: Download the image
-        response = requests.get(image_url)
-        if response.status_code != 200:
-            return {"error": f"Failed to download image from {image_url}"}
+        # Step 2: Download using Supabase client
+        try:
+            image_bytes = download_image_via_supabase(image_url)
+        except Exception as download_error:
+            logging.error(f"Supabase download failed: {download_error}")
+            # Fallback to requests if needed
+            response = requests.get(image_url, timeout=30)
+            if response.status_code != 200:
+                return {"error": f"Both Supabase and direct download failed"}
+            image_bytes = response.content
         
         # Step 3: Create temporary file for the image
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
-            temp_file.write(response.content)
+            temp_file.write(image_bytes)
             temp_image_path = temp_file.name
         
         try:
@@ -1107,3 +1132,11 @@ Available through your existing search and creative endpoints:
 - Analyze images: Use vision API analysis in responses
 - Create with images: Use images as creative references
 """
+
+@app.get("/test-supabase-download")
+async def test_download(url: str):
+    try:
+        image_bytes = download_image_via_supabase(url)
+        return {"status": "success", "size": len(image_bytes)}
+    except Exception as e:
+        return {"error": str(e)}
