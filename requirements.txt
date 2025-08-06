@@ -15,5 +15,4 @@ Pillow
 PyMuPDF
 python-docx
 logging
-time
-re
+
