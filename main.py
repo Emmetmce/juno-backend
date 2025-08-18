@@ -291,7 +291,23 @@ class QueryRequest(BaseModel):
 def calc_cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-async def get_relevant_chunks(query: str, k: int = 5):
+#break ties in similarity scores based on keywords
+def keyword_boost(text: str, query: str) -> float:
+    t = (text or "").lower()
+    q = (query or "").lower()
+    boost = 0.0
+    # very light tie-breakers; safe across domains
+    for kw in ("interview", "summary", "question", "answer"):
+        if kw in t: boost += 0.02
+    # if query mentions a proper noun, nudge lexical match
+    for token in {w.strip(".,!?()[]\"'") for w in q.split() if len(w) > 3}:
+        if token in t: 
+            boost += 0.01
+    return min(boost, 0.08)
+
+async def get_relevant_chunks(query: str, k: int =12, min_sim: float = 0.20,
+                              page: str | None = None,
+                              file: str | None = None):
     """
     Get top k matching chunks from Supabase using vector similarity
     """
@@ -301,12 +317,14 @@ async def get_relevant_chunks(query: str, k: int = 5):
             model="text-embedding-ada-002",
             input=query
         )
-        query_embedding = np.array(embedding_response.data[0].embedding, dtype=np.float32)
+        query_embedding = embedding_response.data[0].embedding
         
         # Query Supabase for both text and image results
-        response = supabase.table("juno_embeddings").select(
-            "id, page_name, chunk, embedding, chunk_index, source_file, file_hash, chunk_hash, file_type, image_url, description, original_filename"
-        ).execute()
+        response = supabase.rpc('match_chunks', {
+            'query_embedding': query_embedding,
+            'match_threshold': min_sim,
+            'match_count': max(k, 20)  # Get a few extra for filtering/boosting
+        }).execute()
 
         if not response.data:
             logging.info("No chunks found in the database")
@@ -316,48 +334,46 @@ async def get_relevant_chunks(query: str, k: int = 5):
         
         # Compute similarity for each chunk
         for chunk in chunks:
-            try:
-                # Convert embedding to json
-                chunk_embedding = chunk["embedding"]
-                if isinstance(chunk_embedding, str):
-                    chunk_embedding = np.array(json.loads(chunk_embedding), dtype=np.float32)
-                else:
-                    chunk_embedding = np.array(chunk_embedding, dtype=np.float32)
-                if len(chunk_embedding) != len(query_embedding):
-                    logging.warning(f"Chunk embedding length mismatch: {len(chunk_embedding)} vs {len(query_embedding)}")
-                    continue
-                chunk["similarity"] = calc_cosine_similarity(query_embedding, chunk_embedding)
-                chunk["content"] = chunk["chunk"]
-                chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
-
-                #add image fields if available
-                if chunk.get("file_type") == "image":
-                    chunk["is_image"] = True
-                else:
-                    chunk["is_image"] = False
-
-            except Exception as e:
-                logging.error(f"Error processing chunk {chunk['id']}: {e}")
-                continue
-        # Filter out chunks with no similarity score
-        valid_chunks = [chunk for chunk in chunks if "similarity" in chunk]
-        logging.info(f"Valid chunks with similarity: {len(valid_chunks)}")
+            original_sim = chunk["similarity"]
+            boost = keyword_boost(chunk["chunk"] or "", query)
+            chunk["similarity"] = original_sim + boost
+            
+            # Set up the fields your existing code expects
+            chunk["content"] = chunk["chunk"]
+            chunk["source"] = chunk.get("page_name") or chunk.get("source_file", "Unknown")
+            
+            # Add image fields if available
+            if chunk.get("file_type") == "image":
+                chunk["is_image"] = True
+            else:
+                chunk["is_image"] = False
         
-        # Sort by similarity and return top k
-        top_chunks = sorted(valid_chunks, key=lambda x: x["similarity"], reverse=True)[:max(k, 20)]
-        # Log similarity scores for debugging
+        # Re-sort after keyword boosting (in case boosts changed the order)
+        chunks = sorted(chunks, key=lambda x: x["similarity"], reverse=True)
+        
+        # Apply additional filters if specified
+        if page:
+            chunks = [c for c in chunks if c.get("page_name") == page]
+        if file:
+            chunks = [c for c in chunks if c.get("source_file") == file]
+        
+        # Return top k after filtering
+        top_chunks = chunks[:k]
+        
+        # Log results for debugging
+        logging.info(f"pgvector search returned {len(response.data)} chunks, filtered to {len(top_chunks)}")
         for i, chunk in enumerate(top_chunks):
             chunk_type = "image" if chunk.get("is_image") else "text"
             logging.info(f"Chunk {i+1} ({chunk_type}): similarity={chunk['similarity']:.3f}, source={chunk['source']}")
-            # log if image
             if chunk_type == "image":
                 logging.info(f"🖼️ Image URL: {chunk.get('image_url')}, description: {chunk.get('description', '')}")
         
         return top_chunks
         
     except Exception as e:
-        logging.error("❌ Error getting matching chunks:", exc_info=True)
+        logging.error("❌ Error getting matching chunks with pgvector:", exc_info=True)
         return []
+
 
 @app.get("/debug/chunks")
 async def debug_chunks():
@@ -466,12 +482,17 @@ async def queryKnowledgeBase(query: QueryRequest):
 
         #get relevant chunks from supabase
         results = await get_relevant_chunks(user_question, k=20)
+        if results:
+            best = max(r["similarity"] for r in results)
+            logging.info(f"Top-{len(results)} hits. best_sim={best:.3f}")
+            for i, r in enumerate(results[:5], 1):
+                logging.info(f"[{i}] sim={r['similarity']:.3f} src={r['source']} idx={r.get('chunk_index')}")
         #seperate text and image results
         text_chunks = [r for r in results if not r.get("is_image")]
         image_chunks = [r for r in results if r.get("is_image")]
 
         # Use top 5 text and top 3 image chunks
-        final_results = text_chunks[:5] + image_chunks[:3]
+        final_results = text_chunks[:8] + image_chunks[:3]
         
         if not results:
             return {

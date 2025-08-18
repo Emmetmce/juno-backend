@@ -135,6 +135,12 @@ def enhanced_extract_text(file_path: str) -> str:
             # Use existing logic for text files
             with open(file_path, "r", encoding="utf-8") as f:
                 text = f.read()
+            #to debug repeating lines
+            logger.info(f"[debug] {file_path} len={len(text)}")
+            for i, line in enumerate(text.splitlines()[:15]):
+                logger.info(f"[debug] line {i+1}: {line}")
+            return text
+            #
         else:
             # Try to read as text file (fallback)
             with open(file_path, "r", encoding="utf-8") as f:
@@ -197,38 +203,98 @@ def is_file_already_embedded(file_path, page_name):
         return False  # If we can't check, assume it's not embedded to be safe
 
 
-def split_text(text, max_tokens=2000):
-    """Split text into token-limited chunks for embedding"""
+def split_text(text, max_tokens=800, overlap_tokens=100):
+    """Split text into overlapping chunks optimized for Q&A and robust for any text format
+    Handles: paragraphs, massive single paragraphs, podcast transcripts, etc."""
+
     enc = tiktoken.get_encoding("cl100k_base") # Using the same encoding as OpenAI
-    paragraphs = text.split("\n\n")
-    chunks = []
-    current_chunk = ""
+    #clean input
+    text = text.strip()
+    if not text:
+        return []
     
-    for para in paragraphs:
-        para_tokens = enc.encode(para)
-        if len(para_tokens) > max_tokens:
-            # if paragraph is too long, split it into smaller chunks
-            start = 0
-            while start < len(para_tokens):
-                end = start + max_tokens
-                chunk_tokens = para_tokens[start:end]
-                chunk_text = enc.decode(chunk_tokens)
-                chunks.append(chunk_text.strip())
-                start = end
-        else:
-            # if paragraph fits, add it to the current chunk
-            test_chunk = current_chunk + para + "\n\n"
-            if len(enc.encode(test_chunk)) <= max_tokens:
-                current_chunk += test_chunk
+     # If the entire text is small enough, return as single chunk
+    total_tokens = len(enc.encode(text))
+    if total_tokens <= max_tokens:
+        return [text]
+    
+    # For very large texts, use safe sliding window approach
+    if total_tokens > 20000:  # If >20k tokens, use safe approach
+        logger.info(f"Large text detected ({total_tokens} tokens), using sliding window")
+        return _safe_sliding_split(text, max_tokens, overlap_tokens, enc)
+    try:
+        paragraphs = text.split("\n\n")  # Split by double newlines to get paragraphs
+        chunks = []
+        current_chunk = ""
+        
+        for i, para in enumerate(paragraphs):
+            para = para.strip()
+            if not para:
+                continue
+            
+            # Safety check - don't let any single paragraph be too big
+            para_tokens = len(enc.encode(para))
+            if para_tokens > max_tokens * 2:  # If paragraph is huge, force split it
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+                chunks.extend(_safe_sliding_split(para, max_tokens, overlap_tokens, enc))
+                continue
+
+            # Normal paragraph processing
+            test_chunk = current_chunk + "\n\n" + para if current_chunk else para
+            test_tokens = len(enc.encode(test_chunk))
+            
+            if test_tokens <= max_tokens:
+                current_chunk = test_chunk
             else:
                 if current_chunk.strip():
                     chunks.append(current_chunk.strip())
-                current_chunk = para + "\n\n"
-    
-    if current_chunk.strip():
-        chunks.append(current_chunk.strip())
-    
-    return chunks
+                current_chunk = para
+        
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+        
+        return chunks
+        
+    except Exception as e:
+        logger.warning(f"Paragraph splitting failed: {e}, falling back to sliding window")
+        return _safe_sliding_split(text, max_tokens, overlap_tokens, enc)
+
+def _safe_sliding_split(text, max_tokens, overlap_tokens, enc):
+    """Safe sliding window split that can't get stuck"""
+    try:
+        tokens = enc.encode(text)
+        chunks = []
+        start = 0
+        max_iterations = len(tokens) // (max_tokens - overlap_tokens) + 10  # Safety limit
+        iterations = 0
+        
+        while start < len(tokens) and iterations < max_iterations:
+            end = min(start + max_tokens, len(tokens))
+            chunk_tokens = tokens[start:end]
+            chunk_text = enc.decode(chunk_tokens).strip()
+            
+            if chunk_text:
+                chunks.append(chunk_text)
+            
+            # Move forward with overlap
+            start = end - overlap_tokens
+            if start >= end or end >= len(tokens):
+                break
+                
+            iterations += 1
+        
+        return chunks
+        
+    except Exception as e:
+        logger.error(f"Even sliding window failed: {e}")
+        # Last resort - just return first chunk
+        try:
+            first_tokens = enc.encode(text)[:max_tokens]
+            return [enc.decode(first_tokens).strip()]
+        except:
+            return ["Error processing text"]
 
 def embed_and_store(file_path, page_name):
     """Embed file content and store in Supabase, enhanced to handle various file types"""
@@ -276,7 +342,8 @@ def embed_and_store(file_path, page_name):
             supabase.table("juno_embeddings").insert({
                 "page_name": page_name,
                 "chunk": searchable_text,
-                "embedding": json.dumps(response),
+                "embedding_vector": response,
+                "embedding": json.dumps(response),  # Store as JSON string REMOVE WHEN MIGRATED
                 "source_file": file_path,
                 "chunk_index": 0,
                 "file_hash": file_hash,
@@ -295,6 +362,8 @@ def embed_and_store(file_path, page_name):
         # Regular file processing (PDF, DOCX, TXT, etc.)
         try:
             text = enhanced_extract_text(file_path)
+            #debug repeating lines
+            logger.info(f"[debug-pre-chunk] {file_path} first 300 chars: {text[:300]!r}")
         
             if not text.strip():
                 logger.warning(f"No text content found in {file_path}")
@@ -328,7 +397,8 @@ def embed_and_store(file_path, page_name):
                     supabase.table("juno_embeddings").insert({
                         "page_name": page_name,
                         "chunk": chunk,
-                        "embedding": json.dumps(response),  # Store as JSON string
+                        "embedding_vector": response,
+                        "embedding": json.dumps(response),  # Store as JSON string for now, delete later
                         "source_file": file_path,
                         "chunk_index": i,
                         "file_hash": file_hash,
