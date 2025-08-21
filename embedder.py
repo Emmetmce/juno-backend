@@ -174,6 +174,50 @@ def hash_chunk(text):
         logger.error(f"Error generating hash for chunk: {e}")
         return None
 
+#metadata helpers
+def stable_doc_id(page_name: str | None) -> str | None:
+    if not page_name:
+        return None
+    return hashlib.md5(page_name.encode("utf-8")).hexdigest()
+
+def infer_source_kind(file_path: str | None, fallback: str = "document") -> str:
+    if not file_path:
+        return fallback
+    ext = os.path.splitext(file_path.lower())[1]
+    if ext in (".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".gif", ".webp", ".svg"):
+        return "image"
+    if ext in (".eml", ".msg"):
+        return "email"
+    return fallback
+
+def ext_from_path(file_path: str | None) -> str | None:
+    if not file_path:
+        return None
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext[1:] if ext.startswith(".") else ext
+
+def quick_word_count(text: str) -> int:
+    return len((text or "").split())
+
+def parse_email_headers(text: str) -> dict | None:
+    """
+    If some of your 'documents' are email bodies saved as text,
+    try to parse basic headers from the first ~20 lines.
+    """
+    lines = (text or "").splitlines()
+    if not lines:
+        return None
+    headers = {}
+    for line in lines[:20]:
+        if ":" not in line:
+            continue
+        key, val = line.split(":", 1)
+        key = key.strip().lower()
+        val = val.strip()
+        if key in ("from", "to", "subject", "date"):
+            headers[key] = val
+    return headers or None
+
 #wont be used as much, going to be using is_chunk_already_embedded instead
 # but keeping this for future reference
 def is_file_already_embedded(file_path, page_name):
@@ -335,15 +379,23 @@ def embed_and_store(file_path, page_name):
         try:
             response = openai.embeddings.create(
                 input=searchable_text,
-                model="text-embedding-ada-002"
+                model="text-embedding-3-small"
             ).data[0].embedding
             
+            # metadata for images
+            img_md = {
+                "doc_id": stable_doc_id(page_name),
+                "source_kind": "image",
+                "title": page_name,
+                "filename": os.path.basename(file_path) if file_path else None,
+                "ext": ext_from_path(file_path),
+                "word_count": quick_word_count(description or searchable_text),
+            }
             # Store in database with image metadata
             supabase.table("juno_embeddings").insert({
                 "page_name": page_name,
                 "chunk": searchable_text,
-                "embedding_vector": response,
-                "embedding": json.dumps(response),  # Store as JSON string REMOVE WHEN MIGRATED
+                "embedding": response,
                 "source_file": file_path,
                 "chunk_index": 0,
                 "file_hash": file_hash,
@@ -351,7 +403,8 @@ def embed_and_store(file_path, page_name):
                 "file_type": "image",
                 "image_url": image_url,  # Store the public URL
                 "original_filename": os.path.basename(file_path),
-                "description": description  # Store the image description
+                "description": description,  # Store the image description
+                "metadata": img_md,
             }).execute()
             
             logger.info(f"Successfully embedded image: {file_path}")
@@ -390,15 +443,14 @@ def embed_and_store(file_path, page_name):
                     # Get embedding from OpenAI
                     response = openai.embeddings.create(
                         input=chunk,
-                        model="text-embedding-ada-002"
+                        model="text-embedding-3-small"
                     ).data[0].embedding
                 
                     # Insert the chunk and its embedding into the Supabase table
                     supabase.table("juno_embeddings").insert({
                         "page_name": page_name,
                         "chunk": chunk,
-                        "embedding_vector": response,
-                        "embedding": json.dumps(response),  # Store as JSON string for now, delete later
+                        "embedding": response,
                         "source_file": file_path,
                         "chunk_index": i,
                         "file_hash": file_hash,
@@ -667,7 +719,7 @@ def search_for_image(query: str, limit: int = 5):
             # Get embedding for the search query
             response = openai.embeddings.create(
                 input=query,
-                model="text-embedding-ada-002"
+                model="text-embedding-3-small"
             ).data[0].embedding
             
             # Semantic search

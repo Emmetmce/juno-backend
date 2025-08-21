@@ -8,7 +8,7 @@ from notion_util import get_page_content, upload_file_to_existing_page, add_file
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
-from typing import List, Literal
+from typing import List, Literal, Optional
 from upload_ui import router as upload_ui_router
 from fastapi.staticfiles import StaticFiles
 import requests
@@ -68,7 +68,7 @@ def embed_text(text: str):
     """Generate embedding for text using OpenAI"""
     try:
         response = openai.embeddings.create(
-            model="text-embedding-ada-002",
+            model="text-embedding-3-small",
             input=text
         )
         return response.data[0].embedding
@@ -287,6 +287,11 @@ async def upload_file_from_gpt(payload: FileUploadRequest):
 # Query embedding class
 class QueryRequest(BaseModel):
     query: str
+    mode: Literal["summary", "quotes", "both"] = "both"  # Default to both mode. allows for quotes to be pulled
+    top_k: int = 20
+    min_score: float = 0.20
+    page: Optional[str] = None
+    file: Optional[str] = None
 
 def calc_cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -309,21 +314,24 @@ async def get_relevant_chunks(query: str, k: int =12, min_sim: float = 0.20,
                               page: str | None = None,
                               file: str | None = None):
     """
-    Get top k matching chunks from Supabase using vector similarity
+    Get top k matching chunks from Supabase using hybrid vector and keyword search
     """
     try:
         # Get embedding for the query
-        embedding_response = openai.embeddings.create(
-            model="text-embedding-ada-002",
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        embedding_response = client.embeddings.create(
+            model="text-embedding-3-small",
             input=query
         )
         query_embedding = embedding_response.data[0].embedding
         
-        # Query Supabase for both text and image results
-        response = supabase.rpc('match_chunks', {
+        #prefer hybrid rpc search if query has multiple keywords
+        logging.info(f"Using hybrid search for query: {query}")
+        response = supabase.rpc('match_chunks_hybrid', {
             'query_embedding': query_embedding,
-            'match_threshold': min_sim,
-            'match_count': max(k, 20)  # Get a few extra for filtering/boosting
+            'query_text': query,
+            'match_count': max(k, 20),
+            'match_threshold': min_sim
         }).execute()
 
         if not response.data:
@@ -334,9 +342,8 @@ async def get_relevant_chunks(query: str, k: int =12, min_sim: float = 0.20,
         
         # Compute similarity for each chunk
         for chunk in chunks:
-            original_sim = chunk["similarity"]
-            boost = keyword_boost(chunk["chunk"] or "", query)
-            chunk["similarity"] = original_sim + boost
+            #use hyrbid score for main similarity
+            chunk["similarity"] = chunk.get("hybrid_score", chunk.get("similarity", 0.0))
             
             # Set up the fields your existing code expects
             chunk["content"] = chunk["chunk"]
@@ -361,17 +368,19 @@ async def get_relevant_chunks(query: str, k: int =12, min_sim: float = 0.20,
         top_chunks = chunks[:k]
         
         # Log results for debugging
-        logging.info(f"pgvector search returned {len(response.data)} chunks, filtered to {len(top_chunks)}")
+        logging.info(f"Hybrid search returned {len(response.data)} chunks, filtered to {len(top_chunks)}")
         for i, chunk in enumerate(top_chunks):
             chunk_type = "image" if chunk.get("is_image") else "text"
-            logging.info(f"Chunk {i+1} ({chunk_type}): similarity={chunk['similarity']:.3f}, source={chunk['source']}")
+            sim_score = chunk.get("similarity", 0.0)
+            kw_score = chunk.get("kw_rank", 0.0)
+            logging.info(f"Chunk {i+1} ({chunk_type}): hybrid_score={sim_score:.3f}, kw_rank={kw_score:.3f}, source={chunk['source']}")
             if chunk_type == "image":
                 logging.info(f"🖼️ Image URL: {chunk.get('image_url')}, description: {chunk.get('description', '')}")
         
         return top_chunks
         
     except Exception as e:
-        logging.error("❌ Error getting matching chunks with pgvector:", exc_info=True)
+        logging.error("❌ Error getting matching chunks with hybrid search:", exc_info=True)
         return []
 
 
@@ -421,7 +430,7 @@ async def debug_search_test():
         
         # Get embedding
         embedding_response = openai.embeddings.create(
-            model="text-embedding-ada-002",  # Make sure this matches your embedder
+            model="text-embedding-3-small",  # Make sure this matches your embedder
             input=test_query
         )
         query_embedding = embedding_response.data[0].embedding
@@ -438,12 +447,14 @@ async def debug_search_test():
         similarities = []
         for chunk in response.data:
             try:
-                embedding_raw = chunk["embedding"]
+                embedding_raw = chunk.get("embedding")
         
-                if isinstance(embedding_raw, str):
+                if isinstance(embedding_raw, (list, tuple)):
+                    embedding_vector = np.array(embedding_raw, dtype=np.float32)
+                elif isinstance(embedding_raw, str):
                     embedding_vector = np.array(json.loads(embedding_raw), dtype=np.float32)
                 else:
-                    embedding_vector = np.array(embedding_raw, dtype=np.float32)
+                    raise ValueError(f"Unexpected embedding format: {type(embedding_raw)}")
 
                 similarity = calc_cosine_similarity(query_embedding, embedding_vector)
 
@@ -481,7 +492,13 @@ async def queryKnowledgeBase(query: QueryRequest):
         user_question = query.query
 
         #get relevant chunks from supabase
-        results = await get_relevant_chunks(user_question, k=20)
+        results = await get_relevant_chunks(
+            user_question,
+            k=query.top_k,
+            min_sim=query.min_score, 
+            page=query.page,
+            file=query.file
+        )
         if results:
             best = max(r["similarity"] for r in results)
             logging.info(f"Top-{len(results)} hits. best_sim={best:.3f}")
@@ -493,6 +510,20 @@ async def queryKnowledgeBase(query: QueryRequest):
 
         # Use top 5 text and top 3 image chunks
         final_results = text_chunks[:8] + image_chunks[:3]
+
+        # Build verbatim quotes from top text chunks (up to 5)
+        quotes = []
+        for r in [x for x in final_results if not x.get("is_image")][:5]:
+            md = r.get("metadata") or r.get("meta") or {}  # your column is 'metadata'
+            ts = md.get("ts_start")
+            quotes.append({
+                "quote": (r.get("content") or "").strip()[:600],   # hard cap for payload
+                "source": r.get("source"),
+                "page_name": r.get("page_name"),
+                "chunk_index": r.get("chunk_index"),
+                "speaker": md.get("speaker"),
+                "similarity": float(r.get("similarity", 0.0)),
+            })
         
         if not results:
             return {
@@ -555,6 +586,9 @@ IMPORTANT INSTRUCTIONS:
 - Be specific and detailed when the context supports it
 - If multiple sources have conflicting information, mention both perspectives
 - Do NOT make assumptions or add information not in the context
+- Use only the provided "Text Context" or attached images.
+- Prefer quoting exact lines from "Text Context" with inline citations like [Source N] and speaker if provided.
+- If a fact is not present in context, say you can’t find it.
 
 When analyzing images, focus on:
 - Visual elements (colors, typography, layout, design style)
@@ -609,15 +643,29 @@ Context quality: Based on the similarity scores, prioritize information from hig
 
         # Make API call with client syntax
         client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            temperature=0.1,  # Lower temperature for more consistent responses
-            max_tokens=1500
-        )
-        
-        answer = response.choices[0].message.content
+        answer = None
+
+        #tiny grounding gate before we spend tokens (keeps current behavior if it skips it)
+        def _should_answer(selected, min_sim=0.25, min_tokens=250):
+            if not selected:
+                return False
+            if max((c.get("similarity") or 0.0) for c in selected) < min_sim:
+                return False
+            # count words in text chunks only
+            text_words = sum(len((c.get("content") or "").split()) for c in selected if not c.get("is_image"))
+            return text_words >= min_tokens
+        if query.mode in ("summary", "both"):
+            if _should_answer(final_results):
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    temperature=0.1,  # Lower temperature for more consistent responses
+                    max_tokens=1500
+                )
+                answer = response.choices[0].message.content
+            else:
+                answer = "I couldn't find enough relevant information to answer that question."
+                confidence = "low"
         
         #combine sources and images
         all_sources = sources + [
@@ -634,16 +682,19 @@ Context quality: Based on the similarity scores, prioritize information from hig
             avg_similarity = sum((r.get("similarity", 0)) for r in results) / len(results)
             confidence = "high" if avg_similarity > 0.7 else "medium" if avg_similarity > 0.5 else "low"
         else:
+            avg_similarity = 0.0
             confidence = "low"
         
-        return {
-            "answer": answer,
+        payload = {
+            "answer": answer if query.mode in ("summary", "both") else None,
+            "quotes": quotes if query.mode in ("quotes", "both") else [],
             "sources": all_sources,
             "confidence": confidence,
             "context_used": len(results),
             "images_analyzed": len(image_sources),
             "debug_info": f"avg similarity={avg_similarity:.3f}, images={len(image_sources)}, text={len(sources)}"
         }
+        return payload
         
     except Exception as e:
         logging.error("❌ Error in query endpoint:", exc_info=True)
@@ -715,7 +766,7 @@ async def get_matching_images(search_query: str, k: int = 10):
     try:
         # Get embedding for the search query
         embedding_response = openai.embeddings.create(
-            model="text-embedding-ada-002",
+            model="text-embedding-3-small",
             input=search_query
         )
         query_embedding = np.array(embedding_response.data[0].embedding, dtype=np.float32)
@@ -1068,7 +1119,7 @@ async def edit_image_with_ai(request: ImageEditRequest):
             # Create embedding for the edited image description
             embedding_response = openai.embeddings.create(
                 input=edited_description,
-                model="text-embedding-ada-002"
+                model="text-embedding-3-small"
             )
             
             # Step 8: Store metadata in database

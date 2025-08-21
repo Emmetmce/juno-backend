@@ -7,84 +7,90 @@ servers:
   - url: https://juno-backend-7lj5.onrender.com
 paths:
   /query:
-    post:
-      operationId: queryKnowledgeBase
-      summary: Query the Juno knowledge base
-      description: Searches the embedded knowledge base and returns AI-generated answers
-      requestBody:
-        required: true
+  post:
+    x-openai-isConsequential: false
+    operationId: queryKnowledgeBase
+    summary: Query the Juno knowledge base
+    description: Searches the embedded knowledge base and returns AI-generated answers with optional quotes and image analysis
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              query:
+                type: string
+                description: User's question or search query
+                example: "What are the Junk Kouture competition rules?"
+              mode:
+                type: string
+                description: How the backend should respond
+                enum: [summary, quotes, both]
+                default: both
+              top_k:
+                type: integer
+                description: Maximum number of chunks to use (feeds k)
+                default: 20
+              min_score:
+                type: number
+                description: Minimum similarity threshold (feeds match_threshold)
+                default: 0.20
+              page:
+                type: string
+                nullable: true
+                description: Optional page_name filter
+              file:
+                type: string
+                nullable: true
+                description: Optional source_file filter
+            required: [query]
+    responses:
+      "200":
+        description: Success
         content:
           application/json:
             schema:
               type: object
               properties:
-                query:
+                answer:
                   type: string
-                  description: The user's question or search query
-                  example: "What are the rules for Junk Kouture competition?"
-              required:
-                - query
-      responses:
-        '200':
-          description: AI-generated answer based on knowledge base content
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  answer:
-                    type: string
-                    description: AI-generated answer based on knowledge base content
-                    example: "According to the competition handbook, participants must..."
-                  sources:
-                    type: array
-                    description: List of sources used to generate the answer
-                    items:
-                      type: object
-                      properties:
-                        name:
-                          type: string
-                          description: Source name
-                        similarity:
-                          type: number
-                          description: Similarity score
-                        rank:
-                          type: integer
-                          description: Source ranking
-                        image_url:
-                          type: string
-                          description: URL of the image associated with the source, if available
-                        description:
-                          type: string
-                          description: Brief description of the image
-                  confidence:
-                    type: string
-                    description: Confidence level of the answer
-                    enum: [high, medium, low]
-                  context_used:
-                    type: integer
-                    description: Number of content chunks used
-        '400':
-          description: Bad request
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  detail:
-                    type: string
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  detail:
-                    type: string
-
+                  nullable: true
+                  description: Present when mode is summary or both
+                quotes:
+                  type: array
+                  description: Present when mode is quotes or both
+                  items:
+                    type: object
+                    properties:
+                      quote:        { type: string }
+                      source:       { type: string }
+                      page_name:    { type: string }
+                      chunk_index:  { type: integer }
+                      speaker:      { type: string, nullable: true }
+                      similarity:   { type: number }
+                sources:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:        { type: string }
+                      similarity:  { type: number }
+                      rank:        { type: integer }
+                      type:        { type: string, description: "text | image" }
+                      image_url:   { type: string, nullable: true }
+                      description: { type: string, nullable: true }
+                confidence:
+                  type: string
+                  enum: [high, medium, low]
+                context_used:    { type: integer }
+                images_analyzed: { type: integer }
+                debug_info:      { type: string }
+      "400": { description: Bad request }
+      "500": { description: Internal server error }
   /get-content:
     get:
+      x-openai-isConsequential: false
       operationId: getNotionContent
       summary: Get specific Notion page content
       description: Retrieves content from a specific Notion page by title
@@ -119,6 +125,7 @@ paths:
 
   /ping:
     get:
+      x-openai-isConsequential: false
       operationId: pingHealthCheck
       summary: Health check endpoint
       description: Simple endpoint to check if the API is running
@@ -136,6 +143,7 @@ paths:
 
   /save_chat:
     post:
+      x-openai-isConsequential: false
       operationId: saveChatTranscript
       summary: Save a chat or interview as a markdown transcript and upload to Notion and Supabase
       description: Saves a chat conversation to a markdown file and stores it in Notion and/or Supabase
@@ -199,6 +207,7 @@ paths:
                     type: string
   /upload_file_from_gpt:
     post:
+      x-openai-isConsequential: false
       operationId: uploadTextFileToNotion
       summary: Upload a text-based file and attach it to a Notion page
       description: Accepts text-based file content via JSON and uploads it to a Notion page. Supports .txt, .md, .yaml, .log, and .json files.
@@ -250,6 +259,7 @@ paths:
                     type: string
   /search-images:
     get:
+      x-openai-isConsequential: false
       operationId: searchImages
       summary: Search images in the knowledge base
       description: Returns images that match a search query based on caption or context
@@ -298,6 +308,7 @@ paths:
           description: Internal server error
   /analyze-images:
     post:
+      x-openai-isConsequential: false
       operationId: analyzeImages
       summary: Analyze images with a prompt using GPT-4 Vision
       description: Accepts a list of image URLs and a custom prompt for analysis
